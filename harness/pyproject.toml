@@ -1,0 +1,16 @@
+[project]
+name = "ocr-harness"
+version = "0.1.0"
+description = "Shared runner: pdf rendering, per-page checkpointing, metrics"
+requires-python = ">=3.10"
+dependencies = [
+    "pypdfium2>=4.30",
+    "pillow>=10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ocr_harness"]

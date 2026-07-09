@@ -1,0 +1,18 @@
+[project]
+name = "paddleocr-vl-run"
+version = "0.0.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "ocr-harness",
+    "paddlepaddle-gpu==3.2.1",
+    "paddleocr[doc-parser]>=3.6.0",
+]
+
+[tool.uv.sources]
+ocr-harness = { path = "../../harness", editable = true }
+paddlepaddle-gpu = { index = "paddle-cu126" }
+
+[[tool.uv.index]]
+name = "paddle-cu126"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+explicit = true

@@ -1,0 +1,27 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+
+# model weights & hf/paddle downloads
+hf_cache/
+*.safetensors
+*.gguf
+*.pdparams
+
+# regenerable intermediates: rasterized pages, vllm server logs
+work/
+
+# per-page checkpoint dirs and raw per-model tool dirs (regenerable);
+# outputs/<model>/<stem>.md, .metrics.json, .html, .json and summary.json stay
+outputs/*/*/
+
+.ipynb_checkpoints/
+data
+

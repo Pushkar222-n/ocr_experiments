@@ -1,0 +1,12 @@
+[project]
+name = "mineru-run"
+version = "0.0.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "ocr-harness",
+    "mineru[core]",
+    "vllm",
+]
+
+[tool.uv.sources]
+ocr-harness = { path = "../../harness", editable = true }

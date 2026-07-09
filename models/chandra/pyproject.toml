@@ -1,0 +1,12 @@
+[project]
+name = "chandra-run"
+version = "0.0.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "ocr-harness",
+    "chandra-ocr",
+    "vllm",
+]
+
+[tool.uv.sources]
+ocr-harness = { path = "../../harness", editable = true }

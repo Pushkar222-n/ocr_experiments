@@ -1,0 +1,17 @@
+[project]
+name = "unlimited-ocr-run"
+version = "0.0.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "ocr-harness",
+    "torch==2.10.*",
+    "transformers==4.57.1",
+    "accelerate",
+    "pillow>=10",
+    "einops",
+    "addict",
+    "easydict",
+]
+
+[tool.uv.sources]
+ocr-harness = { path = "../../harness", editable = true }

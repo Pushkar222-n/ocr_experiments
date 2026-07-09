@@ -1,0 +1,12 @@
+[project]
+name = "lightonocr-run"
+version = "0.0.0"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "ocr-harness",
+    "vllm>=0.11.2",
+    "pillow>=10",
+]
+
+[tool.uv.sources]
+ocr-harness = { path = "../../harness", editable = true }
