@@ -71,3 +71,5 @@ extra (Surya: confidence; LightOnOCR: output token count). Per pdf
 and the mean of any numeric per-page extras. `scripts/compare.py` merges every
 model's `summary.json` into one table + `outputs/comparison.json` for
 downstream (human or LLM) review.
+
+
