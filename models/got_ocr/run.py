@@ -14,6 +14,13 @@ class GotOcr(Adapter):
 
         self.torch = torch
         self.processor = AutoProcessor.from_pretrained(MODEL_ID)
+        # This checkpoint's generation_config has eos_token_id=None, and the tokenizer's
+        # eos is <|endoftext|> (151643) — not the <|im_end|> (151645) the model actually
+        # emits. Passing it explicitly is what makes generate() stop *per sequence*:
+        # stop_strings alone exposes no eos_token_id, so HF never pads finished rows and
+        # a row that ends early keeps decoding garbage until the slowest row in the batch
+        # finishes. Harmless at batch=1, silently corrupts every batched page.
+        self.eos_id = self.processor.tokenizer.convert_tokens_to_ids("<|im_end|>")
         self.model = AutoModelForImageTextToText.from_pretrained(
             MODEL_ID, torch_dtype=torch.bfloat16, device_map="cuda"
         ).eval()
@@ -27,8 +34,8 @@ class GotOcr(Adapter):
             gen = self.model.generate(
                 **inputs,
                 do_sample=False,
-                tokenizer=self.processor.tokenizer,
-                stop_strings="<|im_end|>",
+                eos_token_id=self.eos_id,
+                pad_token_id=self.eos_id,
                 max_new_tokens=4096,
             )
         texts = self.processor.batch_decode(

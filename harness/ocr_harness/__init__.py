@@ -81,12 +81,19 @@ def list_pdfs(names: list[str] | None = None) -> list[Path]:
     return pdfs
 
 
-def combine(model_name: str, pdf: Path, page_dir: Path) -> dict:
+def output_root(model_name: str, smoke: bool = False) -> Path:
+    """Where a run writes. Smoke runs go to a throwaway tree so their pages can never
+    satisfy a real run's checkpoint — a smoke test validates an *unproven* config, so
+    its output is the last thing a real run should resume from."""
+    return OUTPUTS / "_smoke" / model_name if smoke else OUTPUTS / model_name
+
+
+def combine(out_root: Path, pdf: Path, page_dir: Path) -> dict:
     metas = [json.loads(p.read_text()) for p in sorted(page_dir.glob("page_*.meta.json"))]
     md = "\n\n".join(
         (page_dir / f"page_{m['page']:04d}.md").read_text() for m in metas
     )
-    (OUTPUTS / model_name / f"{pdf.stem}.md").write_text(md)
+    (out_root / f"{pdf.stem}.md").write_text(md)
     total_s = sum(m["seconds"] for m in metas)
     doc = {
         "pdf": pdf.name,
@@ -105,17 +112,21 @@ def combine(model_name: str, pdf: Path, page_dir: Path) -> dict:
             vals = [m[k] for m in metas if isinstance(m.get(k), (int, float))]
             if vals:
                 doc[f"mean_{k}"] = round(sum(vals) / len(vals), 4)
-    (OUTPUTS / model_name / f"{pdf.stem}.metrics.json").write_text(json.dumps(doc, indent=2))
+    (out_root / f"{pdf.stem}.metrics.json").write_text(json.dumps(doc, indent=2))
     return doc
 
 
 def run(model_name: str, adapter: Adapter, batch_size: int = 1, dpi: int = 200,
-        pdfs: list[str] | None = None):
+        pdfs: list[str] | None = None, smoke: bool = False):
     docs = []
     loaded = False
+    out_root = output_root(model_name, smoke)
+    if smoke:
+        print(f"[{model_name}] SMOKE RUN -> {out_root} (discardable; will not be "
+              f"resumed by a real run)", flush=True)
     for pdf in list_pdfs(pdfs):
         pages = render_pdf(pdf, dpi)
-        page_dir = OUTPUTS / model_name / pdf.stem / "pages"
+        page_dir = out_root / pdf.stem / "pages"
         page_dir.mkdir(parents=True, exist_ok=True)
         pending = [
             (i, p) for i, p in enumerate(pages)
@@ -140,8 +151,8 @@ def run(model_name: str, adapter: Adapter, batch_size: int = 1, dpi: int = 200,
                 # page_NNNN.json so it can't clobber a native_ext="json" adapter output.
                 (page_dir / f"page_{i:04d}.meta.json").write_text(json.dumps(meta))
             print(f"  {start + len(chunk)}/{len(pending)} ({per_page:.2f}s/page)", flush=True)
-        docs.append(combine(model_name, pdf, page_dir))
-    (OUTPUTS / model_name / "summary.json").write_text(json.dumps(docs, indent=2))
+        docs.append(combine(out_root, pdf, page_dir))
+    (out_root / "summary.json").write_text(json.dumps(docs, indent=2))
     print(json.dumps(docs, indent=2))
 
 
@@ -150,6 +161,8 @@ def cli(model_name: str, make_adapter, default_batch: int = 1):
     ap.add_argument("--pdfs", nargs="*", help="pdf stems to run (default: all)")
     ap.add_argument("--batch-size", type=int, default=default_batch)
     ap.add_argument("--dpi", type=int, default=200)
+    ap.add_argument("--smoke", action="store_true",
+                    help="write to outputs/_smoke/<model>/; never resumed by a real run")
     args = ap.parse_args()
     run(model_name, make_adapter(), batch_size=args.batch_size, dpi=args.dpi,
-        pdfs=args.pdfs)
+        pdfs=args.pdfs, smoke=args.smoke)

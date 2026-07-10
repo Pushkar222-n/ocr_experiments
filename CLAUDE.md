@@ -52,6 +52,12 @@ up, smoke-test it, run the full set, verify, reclaim disk, move to the next.
   `native_ext="json"` adapter's `page_NNNN.json`, so they cannot clobber each other).
   Per-pdf models (`chandra`, `mineru`, `unlimited_ocr` multi-mode) checkpoint on the
   final `<stem>.md` existing.
+- **Smoke tests must pass `--smoke`** (routes to `outputs/_smoke/<model>/`). A smoke run
+  exercises an unvalidated config, so its pages are the *last* thing a real run should
+  resume from — yet without the flag they land in `outputs/<model>/` as done-markers and
+  the full run skips them. This actually bit `got_ocr`: a 7-page smoke test on a broken
+  generation config left 162-char pages that a later full run would have kept.
+  `compare.py` ignores `_smoke/` (it globs `outputs/*/summary.json`, one level up).
 - `run.sh` tees all output to `work/<model>_run.log`, appended across resumes.
 - Neither `outputs/` nor `data/` is committed (public repo, customer PDFs). Carry state
   between pods with a resume bundle: `zip -rq ocr_resume_bundle.zip outputs data`,
@@ -65,36 +71,56 @@ Done, full 68-page set, verified:
 |---|---|---|---|
 | `lightonocr` | ~15.2 | 15.5 GB | emits **HTML** tables, not markdown pipes |
 | `dots_ocr` | ~20.4 | 19.0 GB | layout JSON w/ bbox+category; batch 8 ≈ batch 2 (decode-bound, padding eats the gain) |
+| `got_ocr` | ~8.2 | 13.4 GB | native format is **mathpix LaTeX**, not markdown (`\title{}`, escaped `\&`) despite the `.md` extension. **Treat its char counts as inflated** — see below |
 
 **Finding worth keeping**: on `Flowchart`, `dots_ocr` produced **626 chars** vs
 `lightonocr`'s **4846** (7.7x). dots.mocr's `prompt_layout_all_en` appears to drop text
 *inside* flowchart shapes. Check this before trusting dots_ocr on diagram-heavy docs.
 
+**Finding worth keeping**: `got_ocr` degenerates into token loops on 5 of 68 pages —
+two repeat a SMILES fragment (`[C@@H]1`) into a table, one loops a LaTeX column spec
+(`|c`), one repeats ` 50000000`. Each runs to the 4096-token cap, so its `total_chars`
+*overstates* real extraction. It also collapses on `printouts` (433 chars vs
+lightonocr's 16082) and `Flowchart` (238 vs 4850), while staying competitive on
+`Formulas_with_tables` (21.8k vs 25.0k). Not tunable: `crop_to_patches` fixes the input
+side but the model degenerates past ~3 patches per forward (4/7 pages never emit EOS);
+`format=False` degenerates on 2/7; fp32 rules out numerics; `sdpa` is unsupported for
+this arch. Run it on the stock recipe and read its numbers with the loops in mind.
+A quick scan for this failure mode across any model's pages:
+`re.search(r'(.{1,12}?)\1{15,}', page_text)` — it also flags one `lightonocr` page.
+
+**GOT-OCR needs an explicit `eos_token_id`.** Its `generation_config.eos_token_id` is
+`None` and the tokenizer's eos is `<|endoftext|>` (151643), *not* the `<|im_end|>`
+(151645) the model emits. `stop_strings` alone exposes no `eos_token_id`, so HF never
+pads finished rows: a sequence that ends early keeps decoding garbage until the slowest
+row in the batch finishes. Silent at batch=1, corrupts every page at the adapter's
+`default_batch=4`. Fixed in `models/got_ocr/run.py`; watch for the same trap in any
+other adapter that stops on a string rather than a token id.
+
 Remaining, in this order (surya + chandra last, they need the vLLM server):
 
-1. `got_ocr` — transformers, batch 4. `stepfun-ai/GOT-OCR-2.0-hf`
-2. `unlimited_ocr` — transformers + `trust_remote_code`, batch 1. `baidu/Unlimited-OCR`
-3. `paddleocr_vl` — **the only model with no `uv.lock`; never resolved.** Pins the
+1. `unlimited_ocr` — transformers + `trust_remote_code`, batch 1. `baidu/Unlimited-OCR`
+2. `paddleocr_vl` — **the only model with no `uv.lock`; never resolved.** Pins the
    `cu126` paddle index, which is fine under a 12.8 driver (CUDA 12.x minor compat).
-4. `glm_ocr` — **suspect**: `pyproject.toml` claims `glmocr[selfhosted]` never depends
+3. `glm_ocr` — **suspect**: `pyproject.toml` claims `glmocr[selfhosted]` never depends
    on vLLM, but `run.py`'s docstring says "vLLM decoder". If `GlmOcr()` tries to start
    vLLM at runtime it will fail, since vLLM is not in that venv. Verify before running.
-5. `mineru` — `vlm-transformers` backend.
-6. `surya` — rebuild `models/vllm_server/.venv` (~14 GB, deleted to free space; the
+4. `mineru` — `vlm-transformers` backend.
+5. `surya` — rebuild `models/vllm_server/.venv` (~14 GB, deleted to free space; the
    `uv.lock` is committed). `run.sh` serves on :8100.
-7. `chandra` — carries its **own** vLLM (~14 GB) in its venv; `run.sh` serves on :8200.
+6. `chandra` — carries its **own** vLLM (~14 GB) in its venv; `run.sh` serves on :8200.
    Run `surya` first, reclaim fully, then `chandra` — never both resident.
-8. `python scripts/compare.py`
+7. `python scripts/compare.py`
 
 Also unverified: `mineru` and `chandra` both `shutil.copy(mds[0], ...)` where
 `mds = sorted(work_out.rglob("*.md"))` — i.e. whichever `.md` sorts first. Confirm that
 is the right file. Both also leave their intermediate `outputs/<model>/<stem>/` work
-dirs behind.
+dirs behind. (Their resume-drops-skipped-pdfs-from-`summary.json` bug is fixed.)
 
 ## Working agreements
 
 - Run one model end-to-end before starting the next; never leave two venvs resident.
-- Smoke-test on `--pdfs printouts` (7 pages, ~2 min) before committing to a full run.
+- Smoke-test on `--smoke --pdfs printouts` (7 pages, ~2 min) before committing to a full run.
 - Verify a run by page count (`32/3/12/14/7`) *and* by eyeballing the markdown, not by
   exit code alone.
 - Never delete `outputs/`. Reclaim only venvs, the uv cache, and HF weights.

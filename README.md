@@ -61,6 +61,12 @@ Override batching: `./run.sh dots_ocr --batch-size 8`.
 per-pdf models (chandra, mineru, unlimited_ocr multi-mode) checkpoint on the final
 `.md` existing. Killing a run mid-page costs you that page and nothing else.
 
+**Always smoke-test with `--smoke`.** It redirects the run to `outputs/_smoke/<model>/`,
+so those pages can never satisfy a real run's checkpoint. A smoke test exists to exercise
+a config you have *not* validated yet — without the flag its (possibly garbage) pages
+land in `outputs/<model>/` as done-markers, and the full run silently skips them.
+`outputs/_smoke/` is throwaway; `scripts/compare.py` ignores it.
+
 ### The loop, one model at a time
 
 A full `sample_set` pass is 68 pages and takes 20-40 min per model, and only one
@@ -69,8 +75,8 @@ reclaim, move on. Worked example, exactly how `lightonocr` and `dots_ocr` were d
 
 ```bash
 # 1. smoke-test on the smallest pdf first — catches a broken env in ~2 min
-./run.sh lightonocr --pdfs printouts          # 7 pages
-head -c 500 outputs/lightonocr/printouts.md   # eyeball it before spending 30 min
+./run.sh lightonocr --smoke --pdfs printouts         # 7 pages
+head -c 500 outputs/_smoke/lightonocr/printouts.md  # eyeball it before spending 30 min
 
 # 2. full run, detached (it outlives any 10-min foreground timeout)
 nohup ./run.sh lightonocr > /dev/null 2>&1 &

@@ -10,7 +10,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from ocr_harness import OUTPUTS, gpu_mem_mb, list_pdfs, pdf_page_count
+from ocr_harness import gpu_mem_mb, list_pdfs, output_root, pdf_page_count
 
 MODEL = "mineru"
 
@@ -20,15 +20,20 @@ def main():
     ap.add_argument("--pdfs", nargs="*")
     ap.add_argument("--backend", default="vlm-transformers",
                     help="vlm-transformers | pipeline | vlm-vllm-engine")
+    ap.add_argument("--smoke", action="store_true",
+                    help="write to outputs/_smoke/<model>/; never resumed by a real run")
     args = ap.parse_args()
 
-    out_root = OUTPUTS / MODEL
+    out_root = output_root(MODEL, args.smoke)
     out_root.mkdir(parents=True, exist_ok=True)
     docs = []
     for pdf in list_pdfs(args.pdfs):
         final_md = out_root / f"{pdf.stem}.md"
+        metrics = out_root / f"{pdf.stem}.metrics.json"
         if final_md.exists():  # per-pdf checkpoint
             print(f"skip {pdf.stem} (done)")
+            if metrics.exists():  # keep it in summary.json across resumes
+                docs.append(json.loads(metrics.read_text()))
             continue
         work_out = out_root / pdf.stem
         work_out.mkdir(parents=True, exist_ok=True)
