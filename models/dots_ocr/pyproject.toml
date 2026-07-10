@@ -2,10 +2,18 @@
 name = "dots-ocr-run"
 version = "0.0.0"
 requires-python = ">=3.11,<3.13"
+# torch is capped below 2.11 (cu130 wheels need driver >= 580; this pod is on 570.x /
+# CUDA 12.8). torchvision moves in lockstep or it drags a newer torch back in.
+# transformers stays on 4.x: the checkpoint's remote code declares
+# transformers_version 4.51.0 and subclasses Qwen2ForCausalLM / Qwen2_5_VLProcessor.
 dependencies = [
     "ocr-harness",
-    "vllm>=0.11.0",
+    "torch>=2.10,<2.11",
+    "torchvision>=0.25,<0.26",  # Qwen2VLImageProcessorFast needs it
+    "transformers>=4.57,<5",
+    "accelerate>=1.0",
     "pillow>=10",
+    "hf-transfer>=0.1.9",       # HF_HUB_ENABLE_HF_TRANSFER=1 is set in this image
 ]
 
 [tool.uv.sources]

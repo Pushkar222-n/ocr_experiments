@@ -18,9 +18,14 @@ hf_cache/
 # regenerable intermediates: rasterized pages, vllm server logs
 work/
 
-# per-page checkpoint dirs and raw per-model tool dirs (regenerable);
-# outputs/<model>/<stem>.md, .metrics.json, .html, .json and summary.json stay
-outputs/*/*/
+# OCR results are derived from customer PDFs — this repo is public, so nothing under
+# outputs/ is committed. Carry them between pods with the resume bundle instead:
+#   zip -rq ocr_resume_bundle.zip outputs data
+# Unzipping it at the repo root restores every checkpoint, so runs resume in place.
+outputs/
+
+# resume bundles
+*.zip
 
 .ipynb_checkpoints/
 data

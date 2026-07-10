@@ -2,7 +2,7 @@
 
 Every model adapter implements load() + process_page() (or process_batch()).
 The runner handles: pdf -> page png cache, per-page checkpointing (the
-page_NNNN.json metric file is written last and acts as the "done" marker),
+page_NNNN.meta.json metric file is written last and acts as the "done" marker),
 timing, GPU memory sampling, and assembling per-page markdown into
 outputs/<model>/<pdf_stem>.md.
 """
@@ -82,7 +82,7 @@ def list_pdfs(names: list[str] | None = None) -> list[Path]:
 
 
 def combine(model_name: str, pdf: Path, page_dir: Path) -> dict:
-    metas = [json.loads(p.read_text()) for p in sorted(page_dir.glob("page_*.json"))]
+    metas = [json.loads(p.read_text()) for p in sorted(page_dir.glob("page_*.meta.json"))]
     md = "\n\n".join(
         (page_dir / f"page_{m['page']:04d}.md").read_text() for m in metas
     )
@@ -119,7 +119,7 @@ def run(model_name: str, adapter: Adapter, batch_size: int = 1, dpi: int = 200,
         page_dir.mkdir(parents=True, exist_ok=True)
         pending = [
             (i, p) for i, p in enumerate(pages)
-            if not (page_dir / f"page_{i:04d}.json").exists()
+            if not (page_dir / f"page_{i:04d}.meta.json").exists()
         ]
         print(f"[{model_name}] {pdf.stem}: {len(pages)} pages, {len(pending)} to do", flush=True)
         if pending and not loaded:
@@ -136,7 +136,9 @@ def run(model_name: str, adapter: Adapter, batch_size: int = 1, dpi: int = 200,
                     (page_dir / f"page_{i:04d}.{r.native_ext}").write_text(r.native)
                 meta = {"page": i, "seconds": round(per_page, 3),
                         "chars": len(r.markdown), "gpu_mem_mb": gpu_mem_mb(), **r.extra}
-                (page_dir / f"page_{i:04d}.json").write_text(json.dumps(meta))
+                # written last: acts as the per-page "done" marker. Kept distinct from
+                # page_NNNN.json so it can't clobber a native_ext="json" adapter output.
+                (page_dir / f"page_{i:04d}.meta.json").write_text(json.dumps(meta))
             print(f"  {start + len(chunk)}/{len(pending)} ({per_page:.2f}s/page)", flush=True)
         docs.append(combine(model_name, pdf, page_dir))
     (OUTPUTS / model_name / "summary.json").write_text(json.dumps(docs, indent=2))

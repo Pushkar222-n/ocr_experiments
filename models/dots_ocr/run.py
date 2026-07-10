@@ -1,13 +1,12 @@
-"""dots.mocr (rednote-hilab, formerly dots.ocr) via vLLM in-process (pip, no docker).
+"""dots.mocr (rednote-hilab, formerly dots.ocr) via transformers (trust_remote_code).
 
-Natively supported by vLLM since 0.11.0 — no model-registration workaround
-needed. Uses the card's prompt_layout_all_en prompt: full layout JSON (bbox +
-category + text; tables as HTML, formulas as LaTeX) plus a markdown rendering
-built by concatenating each element's text in reading order.
+Uses the card's prompt_layout_all_en prompt: full layout JSON (bbox + category +
+text; tables as HTML, formulas as LaTeX) plus a markdown rendering built by
+concatenating each element's text in reading order.
 Native output: the raw layout JSON. Markdown: text fields joined in order.
+
+Runs the vision tower's sdpa attention rather than flash-attn — see _stub_flash_attn.
 """
-import base64
-import io
 import json
 import os
 import re
@@ -37,8 +36,48 @@ PROMPT_LAYOUT_ALL_EN = (
 )
 
 
-def data_uri(path: Path) -> str:
-    return "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()
+def _install_flash_attn_shim():
+    """Provide flash_attn.flash_attn_varlen_func backed by torch SDPA.
+
+    modeling_dots_vision.py does a top-level `from flash_attn import
+    flash_attn_varlen_func`, so the module cannot be imported at all without it.
+    Building flash-attn here isn't worth it, and the checkpoint's own sdpa
+    fallback is unusable: it materialises a dense [1, heads, seq, seq] mask, which
+    is >4 GiB for a 200-dpi page (~20k patches) and OOMs.
+
+    Attending over each cu_seqlens segment separately needs no mask at all, so
+    SDPA picks its memory-efficient kernel. Shapes follow flash-attn's varlen
+    convention: q/k/v are (total_tokens, heads, head_dim), and segment i spans
+    cu_seqlens[i]:cu_seqlens[i + 1].
+    """
+    import importlib.util
+    import sys
+    import types
+
+    if importlib.util.find_spec("flash_attn") is not None:
+        return  # prefer the real thing when it's installed
+
+    import torch
+    import torch.nn.functional as F
+
+    def flash_attn_varlen_func(q, k, v, cu_seqlens_q, cu_seqlens_k=None,
+                               max_seqlen_q=None, max_seqlen_k=None,
+                               dropout_p=0.0, softmax_scale=None, causal=False,
+                               **_kwargs):
+        out = torch.empty_like(q)
+        bounds = cu_seqlens_q.tolist()
+        for start, end in zip(bounds[:-1], bounds[1:]):
+            # (len, heads, dim) -> (1, heads, len, dim)
+            qi, ki, vi = (t[start:end].transpose(0, 1).unsqueeze(0) for t in (q, k, v))
+            attn = F.scaled_dot_product_attention(
+                qi, ki, vi, dropout_p=dropout_p, is_causal=causal, scale=softmax_scale
+            )
+            out[start:end] = attn.squeeze(0).transpose(0, 1)
+        return out
+
+    mod = types.ModuleType("flash_attn")
+    mod.flash_attn_varlen_func = flash_attn_varlen_func
+    sys.modules["flash_attn"] = mod
 
 
 def _to_markdown(raw_json: str) -> str:
@@ -60,31 +99,50 @@ def _to_markdown(raw_json: str) -> str:
 
 class DotsOcr(Adapter):
     def load(self):
-        from vllm import LLM, SamplingParams
+        import torch
+        from transformers import AutoConfig, AutoModelForCausalLM, AutoProcessor
 
-        self.llm = LLM(
-            model=MODEL_ID,
-            trust_remote_code=True,
-            gpu_memory_utilization=float(os.environ.get("GPU_MEM_UTIL", "0.9")),
-        )
-        self.sampling = SamplingParams(temperature=0.0, max_tokens=24000)
+        _install_flash_attn_shim()
+        self.torch = torch
+        # vision tower stays on its config default (flash_attention_2) and calls the
+        # shim above; only the text tower needs an explicit sdpa request
+        self.model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID, trust_remote_code=True,
+            dtype=torch.bfloat16, device_map="cuda", attn_implementation="sdpa",
+        ).eval()
+        self.processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+        self.processor.tokenizer.padding_side = "left"  # decoder-only batched generate
 
     def process_batch(self, image_paths: list[Path]) -> list[PageResult]:
-        msgs = [
-            [{"role": "user",
-              "content": [{"type": "image_url", "image_url": {"url": data_uri(p)}},
-                          {"type": "text", "text": PROMPT_LAYOUT_ALL_EN}]}]
-            for p in image_paths
-        ]
-        outs = self.llm.chat(msgs, self.sampling)
+        from PIL import Image
+
+        msgs = [{"role": "user",
+                 "content": [{"type": "image"},
+                             {"type": "text", "text": PROMPT_LAYOUT_ALL_EN}]}]
+        prompt = self.processor.apply_chat_template(
+            msgs, tokenize=False, add_generation_prompt=True
+        )
+        imgs = [Image.open(p).convert("RGB") for p in image_paths]
+        inputs = self.processor(
+            text=[prompt] * len(imgs), images=imgs, return_tensors="pt", padding=True
+        ).to(self.model.device)
+        with self.torch.inference_mode():
+            gen = self.model.generate(**inputs, do_sample=False, max_new_tokens=24000)
+        new = gen[:, inputs["input_ids"].shape[1]:]
+        texts = self.processor.batch_decode(
+            new, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
+        pad_id = self.processor.tokenizer.pad_token_id
         results = []
-        for o in outs:
-            raw = o.outputs[0].text.strip()
-            md = _to_markdown(raw)
-            results.append(PageResult(markdown=md, native=raw, native_ext="json",
-                                       extra={"output_tokens": len(o.outputs[0].token_ids)}))
+        for raw, row in zip(texts, new):
+            raw = raw.strip()
+            results.append(PageResult(
+                markdown=_to_markdown(raw), native=raw, native_ext="json",
+                extra={"output_tokens": int((row != pad_id).sum()) if pad_id is not None
+                       else int(row.numel())},
+            ))
         return results
 
 
 if __name__ == "__main__":
-    cli("dots_ocr", DotsOcr, default_batch=16)
+    cli("dots_ocr", DotsOcr, default_batch=2)

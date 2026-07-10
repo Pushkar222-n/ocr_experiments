@@ -2,10 +2,16 @@
 name = "chandra-run"
 version = "0.0.0"
 requires-python = ">=3.11,<3.13"
+# Chandra keeps vLLM (run.sh serves it over HTTP). The torch ceiling does the work:
+# vLLM 0.20+ pins torch 2.11, which is a +cu130 wheel needing driver >= 580, while
+# this pod is on 570.x (CUDA 12.8). Leaving vllm unpinned lets uv backtrack to the
+# newest vLLM whose torch pin still satisfies <2.11 (i.e. a cu128 build).
 dependencies = [
     "ocr-harness",
     "chandra-ocr",
     "vllm",
+    "torch>=2.10,<2.11",
+    "hf-transfer>=0.1.9",  # HF_HUB_ENABLE_HF_TRANSFER=1 is set in this image
 ]
 
 [tool.uv.sources]

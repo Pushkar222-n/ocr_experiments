@@ -1,4 +1,4 @@
-"""MinerU 2.5 with the vlm-vllm-engine backend (vLLM in-process via pip, no docker).
+"""MinerU 2.5 with the vlm-transformers backend.
 
 MinerU parses whole pdfs with its own internal page batching, so checkpointing
 is per-pdf. Native outputs: markdown + content_list.json (+ middle.json layout).
@@ -18,8 +18,8 @@ MODEL = "mineru"
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pdfs", nargs="*")
-    ap.add_argument("--backend", default="vlm-vllm-engine",
-                    help="vlm-vllm-engine | vlm-transformers | pipeline")
+    ap.add_argument("--backend", default="vlm-transformers",
+                    help="vlm-transformers | pipeline | vlm-vllm-engine")
     args = ap.parse_args()
 
     out_root = OUTPUTS / MODEL

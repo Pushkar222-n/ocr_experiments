@@ -10,11 +10,18 @@ cd "$(dirname "$0")"
 MODEL="${1:?usage: ./run.sh <model> [args]}"
 shift || true
 PROJ="models/$MODEL"
-[ -d "$PROJ" ] || { echo "unknown model '$MODEL' (see models/)"; exit 1; }
+[ -d "$PROJ" ] && [ -f "$PROJ/run.py" ] || { echo "unknown model '$MODEL' (see models/)"; exit 1; }
 
 # keep HF downloads on the persistent volume if running from /workspace
 export HF_HOME="${HF_HOME:-$PWD/hf_cache}"
 mkdir -p work
+
+# Mirror everything (this script, uv, and the model's stdout+stderr) to a per-model
+# run log while still printing to the terminal. Appended, not truncated, so a resumed
+# run keeps the history of the attempts that got it there.
+RUN_LOG="work/${MODEL}_run.log"
+exec > >(tee -a "$RUN_LOG") 2>&1
+echo "===== $(date -Is) :: ./run.sh $MODEL $* ====="
 
 echo "== syncing env for $MODEL =="
 uv sync --project "$PROJ"
@@ -34,7 +41,11 @@ wait_server() { # $1=port
 
 case "$MODEL" in
     surya)
-        uv run --project "$PROJ" vllm serve datalab-to/surya-ocr-2 \
+        # served from models/vllm_server so surya's own venv never carries vLLM's
+        # ~14 GB of wheels (disk is the binding constraint on this pod)
+        echo "== syncing vllm server env =="
+        uv sync --project models/vllm_server
+        uv run --project models/vllm_server vllm serve datalab-to/surya-ocr-2 \
             --port 8100 --gpu-memory-utilization "${GPU_MEM_UTIL:-0.7}" \
             > "work/${MODEL}_vllm.log" 2>&1 &
         SERVER_PID=$!

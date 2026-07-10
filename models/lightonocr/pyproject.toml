@@ -2,10 +2,18 @@
 name = "lightonocr-run"
 version = "0.0.0"
 requires-python = ">=3.11,<3.13"
+# torch is capped below 2.11: 2.11+ ships CUDA 13.0 wheels (+cu130), which need an
+# NVIDIA driver >= 580. This pod's driver is 570.x (CUDA 12.8); CUDA 12.x minor-version
+# compatibility carries us only as far as the cu128 wheels that torch 2.10 ships.
+# torchvision must move in lockstep or it pulls a newer torch (and cu130) back in.
 dependencies = [
     "ocr-harness",
-    "vllm>=0.11.2",
+    "torch>=2.10,<2.11",
+    "torchvision>=0.25,<0.26",  # LightOnOcrProcessor -> PixtralImageProcessor needs it
+    "transformers>=5.13,<6",    # LightOnOcr{ForConditionalGeneration,Processor} live here
+    "accelerate>=1.0",
     "pillow>=10",
+    "hf-transfer>=0.1.9",       # HF_HUB_ENABLE_HF_TRANSFER=1 is set in this image
 ]
 
 [tool.uv.sources]

@@ -2,11 +2,17 @@
 name = "surya-run"
 version = "0.0.0"
 requires-python = ">=3.11,<3.13"
+# No vllm here on purpose: it would add ~14 GB of wheels to this venv for no benefit,
+# since run.sh serves the model from the separate models/vllm_server project and surya
+# reaches it over HTTP via SURYA_INFERENCE_URL.
+# torch stays below 2.11 because 2.11+ ships +cu130 wheels needing driver >= 580.
 dependencies = [
     "ocr-harness",
     "surya-ocr>=0.21",
-    "vllm",
+    "torch>=2.10,<2.11",
+    "torchvision>=0.25,<0.26",
     "markdownify",
+    "hf-transfer>=0.1.9",  # HF_HUB_ENABLE_HF_TRANSFER=1 is set in this image
 ]
 
 [tool.uv.sources]

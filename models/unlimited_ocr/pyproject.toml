@@ -2,15 +2,19 @@
 name = "unlimited-ocr-run"
 version = "0.0.0"
 requires-python = ">=3.12,<3.13"
+# torch 2.10 is the last release with CUDA 12.8 wheels; 2.11+ is cu130 and needs an
+# NVIDIA driver >= 580 (this pod is on 570.x / CUDA 12.8).
 dependencies = [
     "ocr-harness",
-    "torch==2.10.*",
+    "torch>=2.10,<2.11",
+    "torchvision>=0.25,<0.26",
     "transformers==4.57.1",
     "accelerate",
     "pillow>=10",
     "einops",
     "addict",
     "easydict",
+    "hf-transfer>=0.1.9",  # HF_HUB_ENABLE_HF_TRANSFER=1 is set in this image
 ]
 
 [tool.uv.sources]

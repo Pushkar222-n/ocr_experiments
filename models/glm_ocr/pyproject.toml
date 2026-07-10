@@ -2,9 +2,16 @@
 name = "glm-ocr-run"
 version = "0.0.0"
 requires-python = ">=3.12,<3.13"
+# glmocr[selfhosted] pulls torch/torchvision/transformers but never vllm — despite the
+# docs describing a vLLM decoder, it is not a package dependency.
+# torch is capped below 2.11 (cu130 wheels need driver >= 580; this pod is on 570.x /
+# CUDA 12.8) — glmocr only asks for torch>=2.10, which would resolve to cu130.
 dependencies = [
     "ocr-harness",
     "glmocr[selfhosted]",
+    "torch>=2.10,<2.11",
+    "torchvision>=0.25,<0.26",
+    "hf-transfer>=0.1.9",  # HF_HUB_ENABLE_HF_TRANSFER=1 is set in this image
 ]
 
 [tool.uv.sources]

@@ -1,0 +1,17 @@
+[project]
+name = "vllm-server"
+version = "0.0.0"
+requires-python = ">=3.11,<3.13"
+# Standalone vLLM serving environment, not an OCR model project. run.sh starts
+# `vllm serve` from here and the surya adapter talks to it over HTTP, so surya's own
+# venv never carries vLLM's ~14 GB of wheels and the server's lifecycle is independent
+# of the adapter's. (vllm 0.19.1 and surya-ocr do resolve together — transformers
+# 5.13 satisfies both — so merging the two venvs is possible if space ever demands it.)
+#
+# The torch ceiling is what keeps vLLM usable: 0.20+ pins torch 2.11, a +cu130 wheel
+# needing driver >= 580, and this pod's driver is 570.x (CUDA 12.8).
+dependencies = [
+    "vllm",
+    "torch>=2.10,<2.11",
+    "hf-transfer>=0.1.9",  # HF_HUB_ENABLE_HF_TRANSFER=1 is set in this image
+]
