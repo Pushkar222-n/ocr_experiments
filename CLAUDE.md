@@ -201,6 +201,27 @@ Also unverified: `mineru` and `chandra` both `shutil.copy(mds[0], ...)` where
 is the right file. Both also leave their intermediate `outputs/<model>/<stem>/` work
 dirs behind. (Their resume-drops-skipped-pdfs-from-`summary.json` bug is fixed.)
 
+**`total_chars` is not a quality metric and is not comparable across models.** Each model
+emits a different native format, and `total_chars` counts every byte of markup. On the
+same 7-page `printouts`, stripping tags gives:
+
+| model | raw | actual text | % text |
+|---|---|---|---|
+| `paddleocr_vl` | 62,464 | **10,760** | 17.2% |
+| `lightonocr` | 16,082 | 9,349 | 58.1% |
+| `dots_ocr` | 11,588 | 6,900 | 59.5% |
+| `unlimited_ocr` | 14,164 | 6,112 | 43.2% |
+| `got_ocr` | 433 | 427 | 98.6% |
+
+`paddleocr_vl` looks 4x better than `lightonocr` on `total_chars` and is really only
+~15% better on text — it puts `style='text-align: center; word-wrap: break-word;'` on
+*every* `<td>`. `compare.py` now reports `visible_chars` and `pct_text` alongside.
+Caveats: the strip is regex `<[^>]+>`, so it does **not** remove got_ocr's mathpix LaTeX
+or the `<|det|>` grounding tags, which stay overcounted. It is a markup-inflation
+detector, not a scoring function. `pct_text` is computed against the `.md` file, not
+against `summary.json`'s `total_chars` — that field sums per-page counts while
+`combine()` joins pages with `"\n\n"`, so the naive ratio exceeds 100% (got_ocr: 101.4%).
+
 **The final table has two different memory columns, on purpose.** Per-page models go
 through `harness.combine()` and report `max_gpu_mem_mb` — a genuine peak, the max over
 every page's sample. The per-pdf adapters (`mineru`, `chandra`, `unlimited_ocr` multi
