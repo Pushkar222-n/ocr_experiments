@@ -40,6 +40,15 @@ wait_server() { # $1=port
 }
 
 case "$MODEL" in
+    paddleocr_vl)
+        # PaddleX caches weights under ~/.paddlex (paddlex/utils/cache.py:
+        # CACHE_DIR = os.environ.get("PADDLE_PDX_CACHE_HOME", ~/.paddlex)). $HOME is the
+        # container's 30 GB ephemeral overlay, not /workspace — weights would be lost on
+        # pod restart and reclaim.sh could never find them. Keep them on the volume.
+        export PADDLE_PDX_CACHE_HOME="${PADDLE_PDX_CACHE_HOME:-/workspace/.cache/paddlex}"
+        mkdir -p "$PADDLE_PDX_CACHE_HOME"
+        echo "== paddlex cache: $PADDLE_PDX_CACHE_HOME =="
+        ;;
     surya)
         # served from models/vllm_server so surya's own venv never carries vLLM's
         # ~14 GB of wheels (disk is the binding constraint on this pod)

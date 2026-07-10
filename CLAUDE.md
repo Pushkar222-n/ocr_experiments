@@ -130,12 +130,18 @@ Remaining, in this order (the vLLM-server models last — see the regrouping not
    Run the others first, reclaim fully, then `chandra` — never two vLLMs resident.
 6. `python scripts/compare.py`
 
-`unlimited_ocr`'s `infer_multi` (whole-pdf one-shot, `UNLIMITED_MULTI=1`) was only ever
-run on the *small* pdfs (`printouts`, `Flowchart`) — it writes `outputs/unlimited_ocr_multi/`
-and is a throughput data point, not a benchmark row. Do not point it at
-`Complex_table_layouts`: `run_multi` still passes `max_length=32768`, the same ceiling
-that let a single page decode for >8 minutes, and a 32-page one-shot has no per-page
-checkpoint to fall back on.
+`unlimited_ocr`'s `infer_multi` (whole-pdf one-shot, `UNLIMITED_MULTI=1`) writes
+`outputs/unlimited_ocr_multi/` and is a throughput data point, not a benchmark row.
+**Only `Flowchart` completed**: 3 pages, 23.7s (7.9 s/page), **1279 chars — vs 684 in
+per-page mode.** The one-shot pass extracts ~2x more text from the same diagram, so the
+flowchart collapse is partly an artifact of single-page context, not purely the
+"it's a picture" layout call. Worth a look if diagram fidelity matters.
+
+`printouts` (7 pages) was **killed after ~11 min** in one shot and its `summary.json` was
+never written. `run_multi` passes `max_length=32768` — the same ceiling that let one page
+decode for >8 min — and a one-shot has no per-page checkpoint to fall back on. Do not
+point it at `Complex_table_layouts` (32 pages). If you want multi mode on real documents,
+cap `max_length` there too.
 
 **`glm_ocr` is a vLLM-server model, not a transformers model.** The old note here guessed
 `GlmOcr()` might try to *start* vLLM in-process and fail on the missing import. Wrong on

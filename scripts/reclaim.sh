@@ -21,6 +21,11 @@ rm -rf "models/$MODEL/.venv"
 for repo in "$@"; do
     rm -rf "$HF_HOME/hub/models--${repo//\//--}"
 done
+# paddleocr_vl's weights are not on HF — PaddleX caches them under PADDLE_PDX_CACHE_HOME
+# (run.sh points that at /workspace/.cache/paddlex, not the ephemeral ~/.paddlex).
+if [ "$MODEL" = "paddleocr_vl" ]; then
+    rm -rf "${PADDLE_PDX_CACHE_HOME:-/workspace/.cache/paddlex}"
+fi
 
 after=$(du -sm /workspace/.cache "models/$MODEL" 2>/dev/null | awk '{s+=$1} END {print s}')
 echo "reclaimed $(( before - after )) MiB (${before} -> ${after} MiB)"
