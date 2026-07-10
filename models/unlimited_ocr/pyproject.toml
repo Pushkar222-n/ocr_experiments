@@ -14,6 +14,7 @@ dependencies = [
     "einops",
     "addict",
     "easydict",
+    "matplotlib",  # imported by the model's trust_remote_code modeling file
     "hf-transfer>=0.1.9",  # HF_HUB_ENABLE_HF_TRANSFER=1 is set in this image
 ]
 

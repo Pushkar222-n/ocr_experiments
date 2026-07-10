@@ -47,6 +47,12 @@ up, smoke-test it, run the full set, verify, reclaim disk, move to the next.
 - To get the worker PID, match the **venv python binary**, not `run.py`:
   `pgrep -f 'models/<model>/.venv/bin/python'`. Matching `run.py` also matches the
   `uv run` wrapper and short-lived children, and you will end up watching a dead PID.
+- **`pgrep -f` matches its own shell's command line.** A wait loop like
+  `until ! pgrep -f 'run.sh mineru'; do sleep 10; done` never exits: the `bash -c`
+  running it *contains* the string `run.sh mineru`, so pgrep finds itself and the loop
+  spins forever while the real run finished long ago. Wait on the **PID** instead —
+  `nohup ./run.sh <m> & PID=$!; while kill -0 $PID 2>/dev/null; do sleep 20; done` —
+  or use the `[r]un.sh` bracket trick.
 - **Checkpointing**: per-page models write `outputs/<m>/<stem>/pages/page_NNNN.meta.json`
   *last*, as the done-marker (it is `.meta.json`, deliberately distinct from a
   `native_ext="json"` adapter's `page_NNNN.json`, so they cannot clobber each other).
@@ -97,25 +103,65 @@ row in the batch finishes. Silent at batch=1, corrupts every page at the adapter
 `default_batch=4`. Fixed in `models/got_ocr/run.py`; watch for the same trap in any
 other adapter that stops on a string rather than a token id.
 
-Remaining, in this order (surya + chandra last, they need the vLLM server):
+Remaining, in this order (the vLLM-server models last — see the regrouping note):
 
 1. `unlimited_ocr` — transformers + `trust_remote_code`, batch 1. `baidu/Unlimited-OCR`
-2. `paddleocr_vl` — **the only model with no `uv.lock`; never resolved.** Pins the
-   `cu126` paddle index, which is fine under a 12.8 driver (CUDA 12.x minor compat).
-3. `glm_ocr` — **suspect**: `pyproject.toml` claims `glmocr[selfhosted]` never depends
-   on vLLM, but `run.py`'s docstring says "vLLM decoder". If `GlmOcr()` tries to start
-   vLLM at runtime it will fail, since vLLM is not in that venv. Verify before running.
-4. `mineru` — `vlm-transformers` backend.
-5. `surya` — rebuild `models/vllm_server/.venv` (~14 GB, deleted to free space; the
+2. `paddleocr_vl` — pins the `cu126` paddle index, which is fine under a 12.8 driver
+   (CUDA 12.x minor compat). **Resolved 2026-07-10**: `uv lock` succeeds (113 pkgs) and
+   `uv.lock` is now committed. It was never un-resolvable, just never attempted.
+3. `mineru` — `vlm-transformers` backend.
+4. `surya` — rebuild `models/vllm_server/.venv` (~14 GB, deleted to free space; the
    `uv.lock` is committed). `run.sh` serves on :8100.
+5. `glm_ocr` — **needs a served endpoint; see below.** Run it right after `surya` so the
+   `models/vllm_server/.venv` gets built once, not twice.
 6. `chandra` — carries its **own** vLLM (~14 GB) in its venv; `run.sh` serves on :8200.
-   Run `surya` first, reclaim fully, then `chandra` — never both resident.
+   Run the others first, reclaim fully, then `chandra` — never two vLLMs resident.
 7. `python scripts/compare.py`
+
+**`glm_ocr` is a vLLM-server model, not a transformers model.** The old note here guessed
+`GlmOcr()` might try to *start* vLLM in-process and fail on the missing import. Wrong on
+both counts: `glmocr[selfhosted]` really has no vllm dep (checked on PyPI — only
+torch/torchvision/transformers>=5.3/sentencepiece/accelerate/pypdfium2/opencv), and it
+never loads the decoder at all. Reading `glmocr/api.py` + `config.py` + `ocr_client.py`:
+"self-hosted" mode means it is an **HTTP client** that POSTs to
+`http://{ocr_api_host}:{ocr_api_port}/v1/chat/completions`, defaulting to
+`localhost:5002`. Only PP-DocLayout-V3 runs locally. So `run.sh` has no `glm_ocr` case
+and `parse()` will fail with a connection error until one is added: serve
+`zai-org/GLM-OCR` from `models/vllm_server` and point `GlmOcr(ocr_api_host=..., ocr_api_port=...)`
+(or the `api_url` kwarg) at it. Note its `transformers>=5.3.0` floor is far above the
+4.57.x the transformers-based adapters pin — that's fine, the venvs are independent.
+
+`unlimited_ocr`'s `trust_remote_code` modeling file imports **matplotlib**, which the
+pyproject did not list; `transformers.check_imports` hard-fails at `from_pretrained`
+before any weight is touched. Added to `models/unlimited_ocr/pyproject.toml`.
+
+**Do not raise `--batch-size` on `unlimited_ocr` (or any adapter that doesn't override
+`process_batch`).** The GPU really is underutilized — sampled at 1 Hz during generation
+it plateaus at 24-29% and sits at 0% between pages, 8.5 GB of 46 GB — but the flag
+cannot fix it and actively corrupts the metrics. `Adapter.process_batch` *defaults to a
+Python loop over `process_page`*, so `--batch-size 8` does the same 8 sequential
+forwards, and then `harness.run()` divides the batch wall-time by 8 and reports an 8x
+better `seconds_per_page` for identical work. Underneath, the model's `infer()` is
+hardcoded to batch 1 anyway (`input_ids.unsqueeze(0)`, `images=[(crop, ori)]` at
+`modeling_unlimitedocr.py:1027`); its `forward()` does loop over a batch dim, so a real
+batched `infer()` is *possible* but means hand-rolling left-padding + attention mask +
+padded `images_seq_mask` — precisely the code path where GOT-OCR's missing
+`eos_token_id` silently corrupted every page. The model's own throughput answer is
+`infer_multi()` (whole pdf, one forward), already wired up as `UNLIMITED_MULTI=1`.
+Low GPU util at batch 1 is expected for decode-bound VLMs and is *not* a bug to chase.
 
 Also unverified: `mineru` and `chandra` both `shutil.copy(mds[0], ...)` where
 `mds = sorted(work_out.rglob("*.md"))` — i.e. whichever `.md` sorts first. Confirm that
 is the right file. Both also leave their intermediate `outputs/<model>/<stem>/` work
 dirs behind. (Their resume-drops-skipped-pdfs-from-`summary.json` bug is fixed.)
+
+**The final table has two different memory columns, on purpose.** Per-page models go
+through `harness.combine()` and report `max_gpu_mem_mb` — a genuine peak, the max over
+every page's sample. The per-pdf adapters (`mineru`, `chandra`, `unlimited_ocr` multi
+mode) report `gpu_mem_mb` from a *single* `nvidia-smi` sample taken after the pdf
+finishes, by which point memory may already be freed. `compare.py` therefore shows both
+columns, each half-populated. Do not merge them — they are not the same measurement, and
+a unified "peak" column would silently overstate the per-pdf models' footprint.
 
 ## Working agreements
 
