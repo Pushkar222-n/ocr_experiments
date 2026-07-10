@@ -78,10 +78,23 @@ Done, full 68-page set, verified:
 | `lightonocr` | ~15.2 | 15.5 GB | emits **HTML** tables, not markdown pipes |
 | `dots_ocr` | ~20.4 | 19.0 GB | layout JSON w/ bbox+category; batch 8 ≈ batch 2 (decode-bound, padding eats the gain) |
 | `got_ocr` | ~8.2 | 13.4 GB | native format is **mathpix LaTeX**, not markdown (`\title{}`, escaped `\&`) despite the `.md` extension. **Treat its char counts as inflated** — see below |
+| `unlimited_ocr` | ~25.0 | 10.7 GB | 184,140 chars. Native format is grounding tags + HTML tables (`<\|det\|>text [x,y,x,y]<\|/det\|>`), not markdown. Needs `max_length=4096` or it hangs; 6/68 pages hit that cap, all in `Complex_table_layouts`. Capped pages are **under**-counted — see below |
 
 **Finding worth keeping**: on `Flowchart`, `dots_ocr` produced **626 chars** vs
 `lightonocr`'s **4846** (7.7x). dots.mocr's `prompt_layout_all_en` appears to drop text
 *inside* flowchart shapes. Check this before trusting dots_ocr on diagram-heavy docs.
+`unlimited_ocr` collapses the same way (684 chars) but for a *different, verified*
+reason: it classifies the diagram as a picture and emits `![](images/0.jpg)`, never
+attempting the text inside. That is a layout call, not a decode failure.
+
+**TODO — is `dots_ocr`'s flowchart collapse the same mechanism?** "Can't read the shapes"
+and "won't read the shapes" have very different implications for diagram-heavy documents,
+and we have not distinguished them. No GPU or model reload needed: `dots_ocr` already
+wrote per-element layout JSON with a `category` per element to
+`outputs/dots_ocr/Flowchart/pages/page_*.json`. If the flowchart region is tagged
+`Picture` (and its `text` is empty/absent) it is *declining* to OCR inside it, exactly
+like `unlimited_ocr`. If it is tagged `Text`/`Table` but the text is short or garbled, it
+*tried and failed*. Read those three pages' JSON and settle it before the writeup.
 
 **Finding worth keeping**: `got_ocr` degenerates into token loops on 5 of 68 pages —
 two repeat a SMILES fragment (`[C@@H]1`) into a table, one loops a LaTeX column spec
@@ -105,18 +118,24 @@ other adapter that stops on a string rather than a token id.
 
 Remaining, in this order (the vLLM-server models last — see the regrouping note):
 
-1. `unlimited_ocr` — transformers + `trust_remote_code`, batch 1. `baidu/Unlimited-OCR`
-2. `paddleocr_vl` — pins the `cu126` paddle index, which is fine under a 12.8 driver
+1. `paddleocr_vl` — pins the `cu126` paddle index, which is fine under a 12.8 driver
    (CUDA 12.x minor compat). **Resolved 2026-07-10**: `uv lock` succeeds (113 pkgs) and
    `uv.lock` is now committed. It was never un-resolvable, just never attempted.
-3. `mineru` — `vlm-transformers` backend.
-4. `surya` — rebuild `models/vllm_server/.venv` (~14 GB, deleted to free space; the
+2. `mineru` — `vlm-transformers` backend.
+3. `surya` — rebuild `models/vllm_server/.venv` (~14 GB, deleted to free space; the
    `uv.lock` is committed). `run.sh` serves on :8100.
-5. `glm_ocr` — **needs a served endpoint; see below.** Run it right after `surya` so the
+4. `glm_ocr` — **needs a served endpoint; see below.** Run it right after `surya` so the
    `models/vllm_server/.venv` gets built once, not twice.
-6. `chandra` — carries its **own** vLLM (~14 GB) in its venv; `run.sh` serves on :8200.
+5. `chandra` — carries its **own** vLLM (~14 GB) in its venv; `run.sh` serves on :8200.
    Run the others first, reclaim fully, then `chandra` — never two vLLMs resident.
-7. `python scripts/compare.py`
+6. `python scripts/compare.py`
+
+`unlimited_ocr`'s `infer_multi` (whole-pdf one-shot, `UNLIMITED_MULTI=1`) was only ever
+run on the *small* pdfs (`printouts`, `Flowchart`) — it writes `outputs/unlimited_ocr_multi/`
+and is a throughput data point, not a benchmark row. Do not point it at
+`Complex_table_layouts`: `run_multi` still passes `max_length=32768`, the same ceiling
+that let a single page decode for >8 minutes, and a 32-page one-shot has no per-page
+checkpoint to fall back on.
 
 **`glm_ocr` is a vLLM-server model, not a transformers model.** The old note here guessed
 `GlmOcr()` might try to *start* vLLM in-process and fail on the missing import. Wrong on
