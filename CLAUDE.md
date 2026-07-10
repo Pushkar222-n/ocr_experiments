@@ -79,6 +79,7 @@ Done, full 68-page set, verified:
 | `dots_ocr` | ~20.4 | 19.0 GB | layout JSON w/ bbox+category; batch 8 ≈ batch 2 (decode-bound, padding eats the gain) |
 | `got_ocr` | ~8.2 | 13.4 GB | native format is **mathpix LaTeX**, not markdown (`\title{}`, escaped `\&`) despite the `.md` extension. **Treat its char counts as inflated** — see below |
 | `unlimited_ocr` | ~25.0 | 10.7 GB | 184,140 chars. Native format is grounding tags + HTML tables (`<\|det\|>text [x,y,x,y]<\|/det\|>`), not markdown. Needs `max_length=4096` or it hangs; 6/68 pages hit that cap, all in `Complex_table_layouts`. Capped pages are **under**-counted — see below |
+| `paddleocr_vl` | ~25.5 | 17.6 GB | 422,808 raw chars but only ~88.8k visible — inline CSS on **every** `<td>`. Lowest real extraction on `Complex_table_layouts` (46,456) despite the highest raw count (266,794); highest on `printouts` (10,760). Has a layout stage → skips diagrams |
 
 **Finding worth keeping**: on `Flowchart`, `dots_ocr` produced **626 chars** vs
 `lightonocr`'s **4846** (7.7x). dots.mocr's `prompt_layout_all_en` appears to drop text
@@ -96,12 +97,27 @@ OCR inside the diagram — the same behaviour as `unlimited_ocr`, which emits
 `![](images/0.jpg)`. Neither model tried and failed.
 
 `lightonocr` scores 4846 on the same pages because it has **no layout stage** and simply
-reads the whole page. **This is a structural property of layout-then-OCR pipelines**, so
-expect the same collapse from `paddleocr_vl`, `glm_ocr` and `mineru` (all run a layout
-model first) and *not* from end-to-end readers. Check each one's `Flowchart` output
-against this prediction — it costs nothing and is the single most discriminating page in
-the set for diagram-heavy documents. Corollary: on such documents, `total_chars` and
-`visible_chars` measure *whether the model has a layout stage*, not how well it reads.
+reads the whole page. **This is a structural property of layout-then-OCR pipelines.**
+`paddleocr_vl` was predicted to collapse the same way and did — it emits
+`<img src="imgs/img_in_image_box_...">`, yields 161 visible chars (worst of all five),
+and finishes `Flowchart` in 1.77 s/page *because* it skipped the work.
+
+Scoreboard on the single most discriminating page in the set:
+
+| model | raw | visible | layout stage? |
+|---|---|---|---|
+| `lightonocr` | 4846 | **4588** | no — reads everything |
+| `unlimited_ocr` | 684 | 683 | yes — `![](images/0.jpg)` |
+| `dots_ocr` | 626 | 618 | yes — `Picture`, no `text` key |
+| `paddleocr_vl` | 609 | 161 | yes — `<img src=...>` |
+| `got_ocr` | 234 | 236 | no, but degenerate |
+
+**Still to check: `glm_ocr` and `mineru`** — both run a layout model first, so both are
+predicted to skip diagrams. If either reads inside the shapes, that is the interesting
+model for diagram-heavy documents and worth calling out. Costs nothing: just read its
+`Flowchart` output. Corollary: on such documents `total_chars` and `visible_chars`
+measure *whether the model has a layout stage*, not how well it reads — and no tuning
+moves a model across that line.
 
 **Finding worth keeping**: `got_ocr` degenerates into token loops on 5 of 68 pages —
 two repeat a SMILES fragment (`[C@@H]1`) into a table, one loops a LaTeX column spec
@@ -125,17 +141,35 @@ other adapter that stops on a string rather than a token id.
 
 Remaining, in this order (the vLLM-server models last — see the regrouping note):
 
-1. `paddleocr_vl` — pins the `cu126` paddle index, which is fine under a 12.8 driver
-   (CUDA 12.x minor compat). **Resolved 2026-07-10**: `uv lock` succeeds (113 pkgs) and
-   `uv.lock` is now committed. It was never un-resolvable, just never attempted.
-2. `mineru` — `vlm-transformers` backend.
-3. `surya` — rebuild `models/vllm_server/.venv` (~14 GB, deleted to free space; the
+1. `mineru` — `vlm-transformers` backend. **Never started.** Its venv was never built on
+   the previous pod; nothing to resume, nothing to clean.
+2. `surya` — rebuild `models/vllm_server/.venv` (~14 GB, deleted to free space; the
    `uv.lock` is committed). `run.sh` serves on :8100.
-4. `glm_ocr` — **needs a served endpoint; see below.** Run it right after `surya` so the
+3. `glm_ocr` — **needs a served endpoint; see below.** Run it right after `surya` so the
    `models/vllm_server/.venv` gets built once, not twice.
-5. `chandra` — carries its **own** vLLM (~14 GB) in its venv; `run.sh` serves on :8200.
+4. `chandra` — carries its **own** vLLM (~14 GB) in its venv; `run.sh` serves on :8200.
    Run the others first, reclaim fully, then `chandra` — never two vLLMs resident.
-6. `python scripts/compare.py`
+5. `python scripts/compare.py`
+
+## Resuming on a fresh pod (state as of 2026-07-10)
+
+**5 of 9 models are done**: `lightonocr`, `dots_ocr`, `got_ocr`, `unlimited_ocr`,
+`paddleocr_vl` — each a verified 68 pages (32/3/12/14/7).
+
+The pod that produced them was torn down. Nothing is resident: no venvs, no `uv` cache,
+no HF weights, no `work/`. Every remaining model therefore starts from a cold download —
+budget ~4 min of `uv sync` plus a weight pull *before* `nvidia-smi` shows anything on the
+GPU. **0 MiB during a new model's first ~10 minutes is normal, not a hang.** Confirm with
+`ls /proc/<worker-pid>/fd | wc -l` and `ss -tnp | grep <pid>`: live HTTPS sockets and
+growing CPU time mean it is downloading.
+
+`outputs/` was downloaded off the pod, not committed (public repo, customer PDFs). To
+resume, restore it at the repo root — `unzip -q ocr_resume_bundle.zip` or copy the
+`outputs/` and `data/` trees back — and the finished models' `summary.json` files will be
+picked up by `scripts/compare.py`. Without `outputs/`, `compare.py` prints nothing and the
+five completed runs would have to be redone.
+
+Nothing is uncommitted; `main` is pushed through the `paddleocr_vl` results.
 
 `unlimited_ocr`'s `infer_multi` (whole-pdf one-shot, `UNLIMITED_MULTI=1`) writes
 `outputs/unlimited_ocr_multi/` and is a throughput data point, not a benchmark row.
