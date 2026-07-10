@@ -1,10 +1,11 @@
 """Baidu Unlimited-OCR via transformers (trust_remote_code).
 
-Uses the exact model-card recipe: prompt "<image>document parsing.",
-base_size=1024, image_size=640, crop_mode=True, no_repeat_ngram_size=35,
-ngram_window=128. Wrong size/prompt combos are the usual cause of bad pages.
-Per-page mode for checkpointing; UNLIMITED_MULTI=1 switches to the model's
-one-shot whole-pdf infer_multi (its headline feature, pdf-level checkpoint).
+Uses the model-card recipe: prompt "<image>document parsing.", base_size=1024,
+image_size=640, crop_mode=True, no_repeat_ngram_size=35, ngram_window=128.
+Wrong size/prompt combos are the usual cause of bad pages. The one deviation is
+max_length -- see MAX_LENGTH below; the card's 32768 lets a degenerate page decode
+for >8 minutes. Per-page mode for checkpointing; UNLIMITED_MULTI=1 switches to the
+model's one-shot whole-pdf infer_multi (its headline feature, pdf-level checkpoint).
 """
 import json
 import os
@@ -16,6 +17,16 @@ from ocr_harness import (Adapter, PageResult, OUTPUTS, cli, combine, list_pdfs,
                          gpu_mem_mb, render_pdf)
 
 MODEL_ID = os.environ.get("MODEL_ID", "baidu/Unlimited-OCR")
+
+# Per-page decode ceiling (prompt + output; the prompt is ~907 image tokens).
+# The card's 32768 is sized for whole-document infer_multi, not one page. Measured on
+# Complex_table_layouts: healthy pages emit 823-1500 output tokens, but degenerate ones
+# never emit EOS and run to whatever ceiling they are given -- page_0008 hit 7285/7285
+# under an 8192 cap (154s) and was still going after 8 min under 32768. 4096 leaves ~2x
+# headroom over the densest real page and bounds a runaway to ~67s. Greedy decoding
+# (temperature=0), so this cannot change a page that already terminates on its own.
+# It truncates degenerate output; it does not fix it -- char counts stay inflated.
+MAX_LENGTH = int(os.environ.get("UNLIMITED_MAX_LENGTH", "4096"))
 
 
 def _read_saved(out_dir: str) -> str:
@@ -46,7 +57,7 @@ class UnlimitedOcr(Adapter):
                 base_size=1024,
                 image_size=640,
                 crop_mode=True,
-                max_length=32768,
+                max_length=MAX_LENGTH,
                 no_repeat_ngram_size=35,
                 ngram_window=128,
                 save_results=True,

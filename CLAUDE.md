@@ -135,6 +135,27 @@ and `parse()` will fail with a connection error until one is added: serve
 pyproject did not list; `transformers.check_imports` hard-fails at `from_pretrained`
 before any weight is touched. Added to `models/unlimited_ocr/pyproject.toml`.
 
+**`unlimited_ocr` needs a capped `max_length`; the card's 32768 is a landmine.** Some
+pages never emit EOS and decode until they hit whatever ceiling they are given. Measured
+on `Complex_table_layouts` page_0008: still generating after 8 min under the card's
+32768, and under an 8192 cap it emitted exactly 7285 tokens = `8192 - 907` (the prompt is
+~907 image tokens). It consumes the ceiling, whatever it is. Healthy pages emit 823-1500
+output tokens, so `max_length=4096` (now the default, override with
+`UNLIMITED_MAX_LENGTH`) leaves ~2x headroom and bounds a runaway to ~70s. Decoding is
+greedy (`temperature=0` -> `do_sample=False`), so the cap **cannot** alter a page that
+terminates on its own — verified: page_0000 is byte-identical under 32768 and 8192. That
+also means a killed run's existing checkpoints stay valid across a cap change, as long as
+none of them hit the old cap. Rate on dense tables: **6 of 32 pages hit the cap.**
+
+**For `unlimited_ocr`, wall-time is the degeneration signal, not `total_chars`.** Unlike
+`got_ocr` (whose loops *inflate* char counts), this adapter runs `infer(save_results=True)`
+and measures `chars` on the model's *post-processed* output files, not the raw decode.
+The post-processor discards most of a degenerate span, so a capped page can report a
+*small* char count: page_0028 burned the full 68s cap and emitted 770 chars; page_0025,
+69.9s -> 3301 chars. Capped pages are therefore **under**-counted, not over-counted. Find
+them with `seconds > 55` in the per-page meta, not with the repeat regex (which misses
+page_0014 and page_0026 entirely).
+
 **Do not raise `--batch-size` on `unlimited_ocr` (or any adapter that doesn't override
 `process_batch`).** The GPU really is underutilized — sampled at 1 Hz during generation
 it plateaus at 24-29% and sits at 0% between pages, 8.5 GB of 46 GB — but the flag
