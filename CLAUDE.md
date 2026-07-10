@@ -87,14 +87,21 @@ Done, full 68-page set, verified:
 reason: it classifies the diagram as a picture and emits `![](images/0.jpg)`, never
 attempting the text inside. That is a layout call, not a decode failure.
 
-**TODO — is `dots_ocr`'s flowchart collapse the same mechanism?** "Can't read the shapes"
-and "won't read the shapes" have very different implications for diagram-heavy documents,
-and we have not distinguished them. No GPU or model reload needed: `dots_ocr` already
-wrote per-element layout JSON with a `category` per element to
-`outputs/dots_ocr/Flowchart/pages/page_*.json`. If the flowchart region is tagged
-`Picture` (and its `text` is empty/absent) it is *declining* to OCR inside it, exactly
-like `unlimited_ocr`. If it is tagged `Text`/`Table` but the text is short or garbled, it
-*tried and failed*. Read those three pages' JSON and settle it before the writeup.
+**RESOLVED — the flowchart collapse is a layout decision, not an OCR failure.** Checked
+`outputs/dots_ocr/Flowchart/pages/page_*.json` (no GPU needed). Across the 3 pages
+dots.mocr emits **4 `Picture` elements covering 92.8% of all element area, every one with
+no `text` key at all** (absent, not empty). Its whole 626 chars come from Page-header
+(420) + Section-header (98) + Caption (56) + Page-footer (32). So dots_ocr *declines* to
+OCR inside the diagram — the same behaviour as `unlimited_ocr`, which emits
+`![](images/0.jpg)`. Neither model tried and failed.
+
+`lightonocr` scores 4846 on the same pages because it has **no layout stage** and simply
+reads the whole page. **This is a structural property of layout-then-OCR pipelines**, so
+expect the same collapse from `paddleocr_vl`, `glm_ocr` and `mineru` (all run a layout
+model first) and *not* from end-to-end readers. Check each one's `Flowchart` output
+against this prediction — it costs nothing and is the single most discriminating page in
+the set for diagram-heavy documents. Corollary: on such documents, `total_chars` and
+`visible_chars` measure *whether the model has a layout stage*, not how well it reads.
 
 **Finding worth keeping**: `got_ocr` degenerates into token loops on 5 of 68 pages —
 two repeat a SMILES fragment (`[C@@H]1`) into a table, one loops a LaTeX column spec
