@@ -82,6 +82,7 @@ Done, full 68-page set, verified:
 | `paddleocr_vl` | ~25.5 | 17.6 GB | 422,808 raw chars but only ~88.8k visible — inline CSS on **every** `<td>`. Lowest real extraction on `Complex_table_layouts` (46,456) despite the highest raw count (266,794); highest on `printouts` (10,760). Has a layout stage → skips diagrams |
 | `mineru` | **~11.4** | n/a* | **Run it on vLLM — the transformers engine changes the *output*, not just the speed (see below).** 201,262 chars. The **only** model that reads a flowchart's topology: emits it as **mermaid** (`graph TD`, arrows intact) despite having a layout stage. Native output: markdown + `content_list.json`. Row comes from `outputs/mineru/output_vllm/`; the 72.4 s/page transformers run in `outputs/mineru/` is a kept artifact, **not** the benchmark row |
 
+| `glm_ocr` | ~9.6 | **38.3 GB** | **Heaviest VRAM in the set** (and that is *with* the layout model on cpu). 147,321 chars. Native format is **HTML** tables, not markdown pipes -> markup-inflated: `pct_text` runs 39-83% (worst on `printouts`: 12,023 raw -> 4,727 visible). Served on :8300 from `models/vllm_server`; arch resolves as `GlmOcrForConditionalGeneration`, loads clean. **Skips diagrams** — see below |
 | `surya` | **~4.1** | 24.6 GB | **Fastest model in the set** (68 p in 4.6 min). 112,004 chars. Served from `models/vllm_server` on :8100; arch resolves as `Qwen3_5ForConditionalGeneration`, loads clean — no config patch needed. Only model reporting a **confidence** score — but read the trap below before using it |
 
 **`surya`'s confidence is NOT a coverage metric, and it will mislead you.** It is the one
@@ -147,11 +148,38 @@ It has a layout stage and reads the diagram anyway. So the rule is not "layout p
 cannot read diagrams" — it is that most of them *choose* not to. That is a product
 decision, not an architectural limit, and mineru proves the ceiling is higher.
 
-**Still to check: `glm_ocr`** — it runs a layout model first, so it is predicted to skip
-diagrams. If it reads inside the shapes, that is worth calling out. Costs nothing: just
-read its `Flowchart` output. Corollary: on such documents `total_chars` and
-`visible_chars` measure *whether the model has a layout stage*, not how well it reads —
-and no tuning moves a model across that line.
+**CHECKED — `glm_ocr` skips diagrams too, as predicted.** 288 raw / 286 visible chars over
+the 3 `Flowchart` pages: it crops the diagram out (`![Image 0-0](imgs/cropped_page0_idx0.jpg)`)
+and never reads inside it. Second-worst in the field. Corollary: on such documents
+`total_chars` and `visible_chars` measure *whether the model has a layout stage*, not how
+well it reads — and no tuning moves a model across that line.
+
+(Cosmetic bug, no effect on any metric: every glm_ocr page emits the *same* image filename
+`cropped_page0_idx0.jpg`, because the adapter saves each page into a fresh
+`TemporaryDirectory` it then discards — it only keeps the `.md`/`.json`. So the image links
+in `outputs/glm_ocr/*.md` are all dangling. We count text only, so this does not touch the
+numbers, but the markdown is not self-contained.)
+
+**The final scoreboard on `Flowchart` — 6 of the 7 layout-stage models decline to read it,
+and only `mineru` does:**
+
+| model | raw | visible | reads the diagram? |
+|---|---|---|---|
+| `mineru` (vLLM) | **5069** | **4842** | **yes — mermaid, arrows intact** |
+| `lightonocr` | 4846 | 4588 | yes — but only because it has *no* layout stage |
+| `unlimited_ocr` | 684 | 683 | no |
+| `dots_ocr` | 626 | 618 | no |
+| `surya` | 571 | 554 | no (and still reports 0.947 confidence) |
+| `glm_ocr` | 288 | 286 | no |
+| `got_ocr` | 234 | 236 | no (degenerate) |
+| `paddleocr_vl` | 609 | 161 | no |
+
+Two models clear 4.5k visible chars here and they do it for opposite reasons: `lightonocr`
+has no layout stage and simply reads the whole page as pixels, while `mineru` has one and
+*chooses* to parse the diagram anyway. Only `mineru` recovers the **topology** (the arrows,
+the process graph); `lightonocr` returns the node text as loose prose with no structure.
+**If diagram fidelity matters for the customer's documents, `mineru` is the answer and
+nothing else is close.**
 
 **ANSWERED for `mineru`, and it breaks the pattern: it is the only model that reads the
 flowchart's *topology*.** It has a layout stage and still does not skip the diagram — it
@@ -278,9 +306,14 @@ Remaining, in this order (the vLLM-server models last — see the regrouping not
 
 ## Resuming on a fresh pod (state as of 2026-07-11)
 
-**7 of 9 models are done**: `lightonocr`, `dots_ocr`, `got_ocr`, `unlimited_ocr`,
-`paddleocr_vl`, `mineru` (the **vLLM** run — see above), `surya` — each a verified 68
-pages (32/3/12/14/7). Left: `glm_ocr`, then `chandra`, then `scripts/compare.py`.
+**8 of 9 models are done**: `lightonocr`, `dots_ocr`, `got_ocr`, `unlimited_ocr`,
+`paddleocr_vl`, `mineru` (the **vLLM** run — see above), `surya`, `glm_ocr` — each a
+verified 68 pages (32/3/12/14/7). Left: **`chandra`**, then `scripts/compare.py`.
+
+**Before `chandra`, reclaim `models/vllm_server/.venv`** — it is **15 GB**, nothing needs
+it any more (it served mineru, surya and glm_ocr), and chandra carries its *own* ~14 GB
+vLLM inside `models/chandra/.venv`. Both resident will not fit under the ~50 GB quota.
+`scripts/reclaim.sh glm_ocr zai-org/GLM-OCR` then `rm -rf models/vllm_server/.venv`.
 
 **Disk bit us mid-benchmark and will again.** The RunPod volume quota is ~50 GB and is
 *not* visible in `df` (which reports the whole MooseFS cluster, showing hundreds of TB
