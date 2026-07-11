@@ -327,19 +327,56 @@ Remaining, in this order (the vLLM-server models last — see the regrouping not
    Run the others first, reclaim fully, then `chandra` — never two vLLMs resident.
 5. `python scripts/compare.py`
 
+## `lightonocr` on vLLM: 5.4x faster, output unchanged
+
+Same weights, same sampling (temp 0.2 / top_p 0.9 / 4096 tokens — the constants are shared
+by both code paths in `models/lightonocr/run.py`, deliberately, so the engine is the only
+variable). `LIGHTON_VLLM=1 ./run.sh lightonocr --out-tag output_vllm`.
+
+| pdf | pages | transformers | vLLM | speedup |
+|---|---|---|---|---|
+| `Complex_table_layouts` | 32 | 20.72 | **3.92** | 5.3x |
+| `Handwritten` | 14 | 11.97 | **2.01** | 6.0x |
+| `Formulas_with_tables` | 12 | 7.91 | **1.55** | 5.1x |
+| `printouts` | 7 | 13.27 | **2.18** | 6.1x |
+| `Flowchart` | 3 | 6.34 | **1.70** | 3.7x |
+| **TOTAL** | **68** | **15.26** | **2.83** | **5.4x** |
+
+Chars 218,449 → 221,578 (**+1.4%** — unchanged). Wall **17.3 min → 3.2 min**. Degeneration
+**3/68 → 4/68 pages**, i.e. the same rate — and most of those flags are *false positives*
+(`'etected<br>Not D'` is a real table repeating "Not Detected" cells). **Loops are a
+property of this model** (temp 0.2, no repetition penalty), not of the engine; the LaTeX
+loop seen in the smoke run did not even recur in the full run, because sampling is
+stochastic. At 2.83 s/page **`lightonocr` is now the fastest model in the benchmark.**
+
+Unlike `mineru`, nothing about the *output* changed here — which is the expected result
+when the sampling params really are identical, and is the control that makes the mineru
+finding credible: there, the output changed because the engine silently dropped half the
+recipe. Served via `models/chandra`'s venv (it already carries vllm 0.19.1), so this cost
+**no new disk** — see the `VLLM_PROJ` note in `run.sh` if that venv is ever reclaimed.
+
+**Worth doing next:** `got_ocr`, `dots_ocr` and `unlimited_ocr` are still on in-process
+transformers and are very likely understated by the same 3-6x. The bottom of the speed
+table is measuring *un-migrated engines*, not slow models.
+
 ## THE BENCHMARK IS COMPLETE — all 9 models, 68 pages each (state as of 2026-07-11)
 
-| model | s/page | raw chars | **visible** | %text | VRAM |
+| model | engine | s/page | raw chars | **visible** | %text |
 |---|---|---|---|---|---|
-| `surya` | **4.1** | 112,004 | 99,622 | 89% | 24.0 |
-| `got_ocr` | 8.2 | 114,021 | 109,394 | 96%\* | 13.1 |
-| `glm_ocr` | 9.6 | 147,321 | 83,292 | 57% | 37.4 |
-| `chandra` | 9.8 | 180,288 | 109,101 | 61% | 38.0† |
-| `mineru` | 11.4 | 201,262 | **128,299** | 64% | 31.7\* |
-| `lightonocr` | 15.3 | 218,449 | 105,335 | 48% | 15.2 |
-| `dots_ocr` | 21.2 | 154,836 | 91,283 | 59% | 18.6 |
-| `unlimited_ocr` | 25.0 | 184,140 | 97,520 | 53% | 10.5 |
-| `paddleocr_vl` | 25.5 | **422,808** | 88,841 | **21%** | 17.2 |
+| `lightonocr` | **vllm** | **2.8** | 221,578 | 115,566 | 52% |
+| `surya` | vllm | 4.1 | 112,004 | 99,622 | 89% |
+| `got_ocr` | transformers | 8.2 | 114,021 | 109,394 | 96%\* |
+| `glm_ocr` | vllm | 9.6 | 147,321 | 83,292 | 57% |
+| `chandra` | vllm | 9.8 | 180,288 | 109,101 | 61% |
+| `mineru` | **vllm** | 11.4 | 201,262 | **128,299** | 64% |
+| `dots_ocr` | transformers | 21.2 | 154,836 | 91,283 | 59% |
+| `unlimited_ocr` | transformers | 25.0 | 184,140 | 97,520 | 53% |
+| `paddleocr_vl` | paddle | 25.5 | **422,808** | 88,841 | **21%** |
+
+**The s/page column compares engines as much as models.** Both models we moved to vLLM got
+5-6x faster on identical weights and sampling. The four still running in-process are very
+likely understated by the same factor — read the bottom of this table as "not yet migrated",
+not "slow". `compare.py` prints which engine's row it used per model.
 
 \* `got_ocr`'s 96% is an artifact — the tag-stripper is a regex `<[^>]+>` and does not
 remove its mathpix LaTeX, and it degenerates into token loops on 5 of 68 pages. Do not read

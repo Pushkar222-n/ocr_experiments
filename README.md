@@ -1,7 +1,69 @@
 # OCR experiments
 
 Compare OCR models on `data/Evaluation set/sample_set/*.pdf` (merged per-category
-PDFs: Complex_table_layouts, Flowchart, Formulas_with_tables, Handwritten, printouts).
+PDFs: Complex_table_layouts 32p, Flowchart 3p, Formulas_with_tables 12p, Handwritten 14p,
+printouts 7p — **68 pages**).
+
+## Results — all 9 models, 68 pages each
+
+| model | engine | s/page | raw chars | **visible chars** | %text |
+|---|---|---|---|---|---|
+| `lightonocr` | **vllm** | **2.8** | 221,578 | 115,566 | 52% |
+| `surya` | vllm | 4.1 | 112,004 | 99,622 | 89% |
+| `got_ocr` | transformers | 8.2 | 114,021 | 109,394 | 96%¹ |
+| `glm_ocr` | vllm | 9.6 | 147,321 | 83,292 | 57% |
+| `chandra` | vllm | 9.8 | 180,288 | 109,101 | 61% |
+| `mineru` | **vllm** | 11.4 | 201,262 | **128,299** | 64% |
+| `dots_ocr` | transformers | 21.2 | 154,836 | 91,283 | 59% |
+| `unlimited_ocr` | transformers | 25.0 | 184,140 | 97,520 | 53% |
+| `paddleocr_vl` | paddle | 25.5 | **422,808** | 88,841 | **21%** |
+
+> ⚠️ **The s/page column compares engines as much as models.** Five models run under vLLM
+> (continuous batching); four still run in-process, where a padded static batch costs as
+> much as its longest page. Both models we A/B'd got **5-6x faster** just by moving to
+> vLLM with *identical* weights and sampling — `lightonocr` 15.3 → **2.8**, `mineru`
+> 72.4 → **11.4**. So `got_ocr`, `dots_ocr`, `unlimited_ocr` and `paddleocr_vl` are very
+> likely understated by a similar factor, and their positions at the bottom of this table
+> should not be read as "slow models". They are un-migrated ones. `compare.py` prints which
+> engine's row it used for each model.
+
+**Rank on `visible chars`, never on `total_chars`.** Each model emits a different native
+format and `total_chars` counts every byte of markup. `paddleocr_vl` tops the raw column
+with 422,808 chars and lands **8th of 9** on real text, because it puts inline CSS on
+*every* `<td>`. ¹ `got_ocr`'s 96% is the mirror artifact — the stripper is a regex
+`<[^>]+>` and does not remove its mathpix LaTeX, and it degenerates into token loops on
+5 of 68 pages, inflating its count. ² VRAM for the vLLM-served models is a *reservation*
+(`--gpu-memory-utilization`), not demand — do not compare it against the in-process models.
+
+**Three findings that outrank the table:**
+
+1. **Serve the model with vLLM. It is free speed, and sometimes free quality.** Two models
+   were A/B'd with identical weights and identical sampling, engine the only variable:
+   - **`lightonocr`: 15.3 → 2.8 s/page (5.4x), output unchanged** (218,449 → 221,578 chars,
+     +1.4%; degeneration 3/68 → 4/68 pages, and most of those flags are false positives —
+     repeated "Not Detected" cells in a real table). A pure, free 5.4x. **It becomes the
+     fastest model in the benchmark.**
+   - **`mineru`: 72.4 → 11.4 s/page (6.4x), and the output got *better*** — because its
+     transformers client silently drops the `presence_penalty`/`frequency_penalty` that
+     `mineru_vl_utils` sets for every content type (the library marks them
+     `# not supported by hf`). 190,218 → 201,262 chars, and 2-of-3 → 3-of-3 flowchart
+     graphs recovered. **On mineru the engine is not a performance choice, it is a
+     correctness one.** See CLAUDE.md.
+
+   The mechanism is the same in both cases: the transformers path static-batches and pads,
+   so every batch costs as much as its longest page, and the GPU idles. vLLM continuously
+   batches. **`mineru` extracts the most real text of any model here (128,299 visible) —
+   but only when served.**
+2. **`surya` is 2.4x faster than anything else**, and the only model reporting a confidence
+   score — **which is not a coverage metric.** It is page-level (every block on a page
+   carries an identical value), and it grades only what surya *chose* to read. On
+   `Flowchart` it dropped the entire diagram and still reported **0.947**. Do not use it as
+   a quality gate.
+3. **Only `chandra` and `mineru` read diagrams at all** — both emit the flowchart's topology
+   as mermaid. `chandra` is better at it (24 nodes / 55 edges / **10 feedback loops** vs
+   21 / 40 / **0**): it captures the QC sampling steps that cycle *back* into the process
+   line, which `mineru` flattens away. The other 6 layout-stage models crop the diagram to
+   an image and never read inside it. That is a *choice* they make, not a limit they hit.
 
 ## Layout
 
@@ -40,7 +102,8 @@ one, runs it over all of `sample_set`, and tees everything to `work/<model>_run.
 
 ```bash
 ./run.sh got_ocr
-./run.sh lightonocr
+./run.sh lightonocr                                          # in-process transformers
+LIGHTON_VLLM=1 ./run.sh lightonocr --out-tag output_vllm     # same weights, served by vllm
 ./run.sh dots_ocr
 ./run.sh unlimited_ocr
 UNLIMITED_MULTI=1 uv run --project models/unlimited_ocr python models/unlimited_ocr/run.py  # one-shot whole-pdf mode
@@ -126,14 +189,14 @@ HF repo ids per model, for the reclaim call:
 | model | backend | native format | batches on GPU | notes |
 |---|---|---|---|---|
 | GOT-OCR-2.0 | transformers | markdown (mathpix `format=True`) | yes (batch=4) | generic; `format=True` prompt |
-| LightOnOCR-2-1B | transformers (`LightOnOcr*` classes) | markdown | yes (batch=4) | temp=0.2, top_p=0.9, images resized to 1540px longest side |
+| LightOnOCR-2-1B | transformers (`LightOnOcr*` classes), **or a pip-vllm server** (`LIGHTON_VLLM=1` -> `LIGHTON_URL`) | markdown | transformers: static batch=4 (pads); vllm: 8 concurrent requests | temp=0.2, top_p=0.9, images resized to 1540px longest side — **identical on both engines**, so the engine is the only variable. vLLM is ~3x faster at equivalent quality; see the A/B below |
 | dots.mocr (rednote-hilab, formerly dots.ocr) | transformers, `trust_remote_code` | layout json (bbox+category+text; tables as HTML, formulas as LaTeX) | yes (batch=2) | uses card's `prompt_layout_all_en`; markdown built by joining element text in reading order; ships an SDPA shim for the vision tower's flash-attn import |
 | Unlimited-OCR (Baidu) | transformers, `trust_remote_code` | markdown/text | no (1 img/call); `infer_multi` batches whole pdf in one forward pass | uses card's exact recipe (`base_size=1024, image_size=640, crop_mode=True`) — your earlier bad pages were likely a size/prompt mismatch |
 | PaddleOCR-VL-1.6 | paddlepaddle-gpu 3.2.1 | markdown + layout json | pipeline-internal | best-in-class for tables/formulas per OmniDocBench |
 | GLM-OCR | glmocr[selfhosted] (+ PP-DocLayout-V3) | markdown + json (bboxes) | pipeline-internal | layout model can run on CPU (`LAYOUT_DEVICE=cpu`) to save VRAM |
-| MinerU 2.5 | `mineru[core]`, **`vlm-http-client` against a pip-vllm server** (`MINERU_URL`); the default in-process engine changes the output, see above | markdown + content_list.json | vLLM continuous batching | checkpoints per-pdf. **Only model here that reads a flowchart's topology** — emits it as mermaid (`graph TD`, arrows intact) despite having a layout stage |
-| Surya 2 | external pip-vllm server (`SURYA_INFERENCE_URL`) | block json incl. **per-block confidence**, markdown via markdownify | vLLM continuous batching | only model here with a native quality score |
-| Chandra OCR 2 | external pip-vllm server (its own docker launcher swapped for a plain `vllm serve`) | markdown + html + metadata json (token counts) | vLLM continuous batching (`--batch-size`) | checkpoints per-pdf |
+| MinerU 2.5 | `mineru[core]`, **`vlm-http-client` against a pip-vllm server** (`MINERU_URL`); the default in-process engine changes the output, see above | markdown + content_list.json | vLLM continuous batching | checkpoints per-pdf. **Extracts the most real text of any model here** (128,299 visible). Reads a flowchart's topology as mermaid — one of only two that do, and the weaker of the two (no feedback loops) |
+| Surya 2 | external pip-vllm server (`SURYA_INFERENCE_URL`) | block json incl. **per-block confidence**, markdown via markdownify | vLLM continuous batching | fastest model here (4.1 s/page). Its confidence is **page-level and is not a coverage metric** — it scored 0.947 on a page where it dropped the whole diagram. Do not gate on it |
+| Chandra OCR 2 | external pip-vllm server (its own docker launcher swapped for a plain `vllm serve`); carries its **own** vllm (~15 GB) — run it last | markdown + html + metadata json (token counts) | vLLM continuous batching (`--batch-size`) | checkpoints per-pdf. **Best diagram parser in the field** — 24 nodes / 55 edges / 10 feedback loops on `Flowchart` vs mineru's 21/40/0 — but fences the mermaid *bare*, so it will not auto-render |
 
 Surya's and Chandra's docs default to a `docker run vllm`/`chandra_vllm` launcher —
 since RunPod pods can't do docker-in-docker, `run.sh` instead does
@@ -155,8 +218,17 @@ CLAUDE.md, which is why mineru is served from a patched copy of its config.
 Disk is the tighter constraint. `/workspace` is a MooseFS mount with **no hardlink
 support**, so `uv` *copies* rather than links out of its cache — every `uv sync`
 writes the venv's bytes twice (once in `/workspace/.cache/uv/archive-v0`, once in
-`models/<x>/.venv`). A vLLM venv alone is ~14 GB. Run one model at a time and reclaim
+`models/<x>/.venv`). A vLLM venv alone is ~14-15 GB. Run one model at a time and reclaim
 after each:
+
+> **The volume quota (~50 GB) is invisible to `df`.** `df` reports the whole MooseFS
+> cluster and will cheerfully tell you there are hundreds of TB free while the volume is
+> full. **Use `du -sh /workspace`.** When it fills, `uv sync` is **killed with no error**:
+> the log simply stops mid-download and leaves a half-written venv. That happened once here
+> and looked exactly like a hang. If a sync dies quietly, suspect the quota first, reclaim,
+> and retry — it worked first time after. The uv cache regrows to ~10 GB with *every*
+> model, so reclaiming between models is not housekeeping, it is what keeps you under the
+> ceiling.
 
 ```bash
 uv cache clean                  # safe: venvs are independent copies, not links

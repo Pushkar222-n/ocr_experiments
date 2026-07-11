@@ -81,11 +81,17 @@ def list_pdfs(names: list[str] | None = None) -> list[Path]:
     return pdfs
 
 
-def output_root(model_name: str, smoke: bool = False) -> Path:
+def output_root(model_name: str, smoke: bool = False, tag: str | None = None) -> Path:
     """Where a run writes. Smoke runs go to a throwaway tree so their pages can never
     satisfy a real run's checkpoint — a smoke test validates an *unproven* config, so
-    its output is the last thing a real run should resume from."""
-    return OUTPUTS / "_smoke" / model_name if smoke else OUTPUTS / model_name
+    its output is the last thing a real run should resume from.
+
+    `tag` writes to outputs/<model>/<tag>/ instead, so an A/B of the same model on a
+    different inference engine cannot overwrite (or resume from!) the baseline it is
+    being compared against. compare.py prefers a tagged run over the untagged one and
+    says so on stderr."""
+    root = OUTPUTS / "_smoke" / model_name if smoke else OUTPUTS / model_name
+    return root / tag if tag else root
 
 
 def combine(out_root: Path, pdf: Path, page_dir: Path) -> dict:
@@ -117,10 +123,10 @@ def combine(out_root: Path, pdf: Path, page_dir: Path) -> dict:
 
 
 def run(model_name: str, adapter: Adapter, batch_size: int = 1, dpi: int = 200,
-        pdfs: list[str] | None = None, smoke: bool = False):
+        pdfs: list[str] | None = None, smoke: bool = False, out_tag: str | None = None):
     docs = []
     loaded = False
-    out_root = output_root(model_name, smoke)
+    out_root = output_root(model_name, smoke, out_tag)
     if smoke:
         print(f"[{model_name}] SMOKE RUN -> {out_root} (discardable; will not be "
               f"resumed by a real run)", flush=True)
@@ -163,6 +169,9 @@ def cli(model_name: str, make_adapter, default_batch: int = 1):
     ap.add_argument("--dpi", type=int, default=200)
     ap.add_argument("--smoke", action="store_true",
                     help="write to outputs/_smoke/<model>/; never resumed by a real run")
+    ap.add_argument("--out-tag",
+                    help="write to outputs/<model>/<tag>/ instead, so an engine A/B cannot "
+                         "overwrite or resume from the baseline it is compared against")
     args = ap.parse_args()
     run(model_name, make_adapter(), batch_size=args.batch_size, dpi=args.dpi,
-        pdfs=args.pdfs, smoke=args.smoke)
+        pdfs=args.pdfs, smoke=args.smoke, out_tag=args.out_tag)

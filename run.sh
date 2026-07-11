@@ -109,6 +109,30 @@ case "$MODEL" in
             export MINERU_URL=http://127.0.0.1:8400
         fi
         ;;
+    lightonocr)
+        # Default: in-process transformers. LIGHTON_VLLM=1 serves the same weights instead.
+        #
+        # Served from models/chandra's venv, not models/vllm_server: chandra already carries
+        # vllm 0.19.1 (identical version) and its venv is still resident, so this reuses
+        # ~15 GB that is already on disk instead of re-syncing vllm_server from scratch.
+        # If chandra's venv has been reclaimed, swap the --project back to models/vllm_server
+        # (its uv.lock is committed) -- the serve command is otherwise unchanged.
+        if [ "${LIGHTON_VLLM:-0}" = "1" ]; then
+            VLLM_PROJ="${VLLM_PROJ:-models/chandra}"
+            echo "== serving lightonocr via $VLLM_PROJ's vllm =="
+            uv run --project "$VLLM_PROJ" vllm serve lightonai/LightOnOCR-2-1B \
+                --served-model-name lightonocr --port 8500 \
+                --gpu-memory-utilization "${GPU_MEM_UTIL:-0.8}" \
+                --limit-mm-per-prompt '{"image": 1}' \
+                > "work/${MODEL}_vllm.log" 2>&1 &
+            SERVER_PID=$!
+            wait_server 8500
+            # WITH /v1 -- the adapter appends only /chat/completions (unlike mineru, whose
+            # client appends the whole /v1/chat/completions path itself).
+            export LIGHTON_URL=http://127.0.0.1:8500/v1
+            export LIGHTON_MODEL=lightonocr
+        fi
+        ;;
     chandra)
         uv run --project "$PROJ" vllm serve datalab-to/chandra-ocr-2 \
             --served-model-name chandra --port 8200 \
