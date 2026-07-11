@@ -20,7 +20,17 @@ class GlmOcrAdapter(Adapter):
     def load(self):
         from glmocr import GlmOcr
 
-        self.parser = GlmOcr(layout_device=os.environ.get("LAYOUT_DEVICE", "cpu"))
+        # mode="selfhosted" is not optional: MaaSApiConfig.enabled defaults to True, so a
+        # bare GlmOcr() posts to Zhipu's *cloud* endpoint rather than anything local. In
+        # selfhosted mode only PP-DocLayout-V3 runs in-process; the decoder is an HTTP call
+        # to {host}:{port}/v1/chat/completions, which run.sh points at a local vllm serve.
+        self.parser = GlmOcr(
+            mode="selfhosted",
+            ocr_api_host=os.environ.get("GLM_OCR_HOST", "127.0.0.1"),
+            ocr_api_port=int(os.environ.get("GLM_OCR_PORT", "8300")),
+            model=os.environ.get("GLM_OCR_MODEL", "glm-ocr"),
+            layout_device=os.environ.get("LAYOUT_DEVICE", "cpu"),
+        )
 
     def process_page(self, image_path: Path) -> PageResult:
         result = self.parser.parse(str(image_path))

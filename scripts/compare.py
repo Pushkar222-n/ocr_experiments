@@ -36,10 +36,32 @@ def text_ratio(md_path: Path) -> tuple[int, float] | None:
     return vis, round(100 * vis / len(raw), 1) if raw else 0.0
 
 
-def main():
-    rows = []
+def summaries():
+    """One summary.json per model, preferring an engine-tagged re-run over the base one.
+
+    An adapter's --out-tag writes to outputs/<model>/<tag>/, one level below the plain
+    glob. Without this, mineru would silently report its *transformers* row -- the run we
+    keep only as an artifact, because that engine drops mineru's own presence/frequency
+    penalties and both under-extracts and runs 6.4x slow (see CLAUDE.md). Prefer the
+    tagged summary and report which one was used, so the choice is never invisible.
+    """
     for summary in sorted(OUTPUTS.glob("*/summary.json")):
         model = summary.parent.name
+        tagged = sorted(summary.parent.glob("*/summary.json"))
+        if tagged:
+            if len(tagged) > 1:
+                sys.exit(f"{model}: {len(tagged)} tagged runs, cannot pick a row: "
+                         + ", ".join(t.parent.name for t in tagged))
+            print(f"{model}: using {tagged[0].parent.name}/ "
+                  f"(ignoring the untagged run)", file=sys.stderr)
+            yield model, tagged[0]
+        else:
+            yield model, summary
+
+
+def main():
+    rows = []
+    for model, summary in summaries():
         for doc in json.loads(summary.read_text()):
             row = {"model": model, **doc}
             stem = Path(doc.get("pdf", "")).stem

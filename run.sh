@@ -62,6 +62,53 @@ case "$MODEL" in
         export SURYA_INFERENCE_BACKEND=vllm
         export SURYA_INFERENCE_URL=http://127.0.0.1:8100/v1
         ;;
+    glm_ocr)
+        # glmocr[selfhosted] ships no vllm: it is an HTTP *client* that POSTs to
+        # {ocr_api_host}:{ocr_api_port}/v1/chat/completions. Only PP-DocLayout-V3 runs
+        # in-process (on cpu, so the GPU is left to the decoder). Serve the decoder from
+        # models/vllm_server, same as surya, so glm_ocr's venv stays vllm-free.
+        echo "== syncing vllm server env =="
+        uv sync --project models/vllm_server
+        uv run --project models/vllm_server vllm serve zai-org/GLM-OCR \
+            --served-model-name glm-ocr --port 8300 \
+            --gpu-memory-utilization "${GPU_MEM_UTIL:-0.8}" \
+            --limit-mm-per-prompt '{"image": 1}' \
+            > "work/${MODEL}_vllm.log" 2>&1 &
+        SERVER_PID=$!
+        wait_server 8300
+        export GLM_OCR_HOST=127.0.0.1
+        export GLM_OCR_PORT=8300
+        export GLM_OCR_MODEL=glm-ocr
+        export LAYOUT_DEVICE="${LAYOUT_DEVICE:-cpu}"
+        ;;
+    mineru)
+        # Default: no server, mineru runs the VLM in-process on the transformers engine.
+        # MINERU_VLLM=1 instead serves the same weights from models/vllm_server and points
+        # the adapter at them, which is the engine MinerU itself recommends -- the
+        # transformers path measured 72.4 s/page over the 68-page set, 3-9x slower than
+        # every other model here, purely because of the engine. Same weights either way, so
+        # only the timings should move; the markdown should not.
+        if [ "${MINERU_VLLM:-0}" = "1" ]; then
+            echo "== syncing vllm server env =="
+            uv sync --project models/vllm_server
+            # Serve a patched copy, not the hub repo: vllm 0.19.1 reads tie_word_embeddings
+            # from the top level of the config, MinerU2.5 only sets it in text_config, and
+            # the mismatch kills weight loading on the missing (because tied) lm_head.
+            # scripts/mineru_vllm_model.py explains it in full and prints the local path.
+            MINERU_MODEL_DIR=$(uv run --project models/vllm_server python scripts/mineru_vllm_model.py)
+            echo "== serving $MINERU_MODEL_DIR =="
+            uv run --project models/vllm_server vllm serve "$MINERU_MODEL_DIR" \
+                --served-model-name mineru --port 8400 \
+                --gpu-memory-utilization "${GPU_MEM_UTIL:-0.7}" \
+                --limit-mm-per-prompt '{"image": 1}' \
+                > "work/${MODEL}_vllm.log" 2>&1 &
+            SERVER_PID=$!
+            wait_server 8400
+            # base url, no /v1 -- mineru appends /v1/chat/completions itself. Copying the
+            # ".../v1" form the surya/chandra cases use would produce /v1/v1/chat/completions.
+            export MINERU_URL=http://127.0.0.1:8400
+        fi
+        ;;
     chandra)
         uv run --project "$PROJ" vllm serve datalab-to/chandra-ocr-2 \
             --served-model-name chandra --port 8200 \

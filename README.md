@@ -45,8 +45,8 @@ one, runs it over all of `sample_set`, and tees everything to `work/<model>_run.
 ./run.sh unlimited_ocr
 UNLIMITED_MULTI=1 uv run --project models/unlimited_ocr python models/unlimited_ocr/run.py  # one-shot whole-pdf mode
 ./run.sh paddleocr_vl
-./run.sh glm_ocr
-./run.sh mineru
+./run.sh glm_ocr    # starts `vllm serve zai-org/GLM-OCR`; glmocr is only an http client
+MINERU_VLLM=1 ./run.sh mineru --backend vlm-http-client --out-tag output_vllm  # see below
 ./run.sh surya      # starts `vllm serve datalab-to/surya-ocr-2` (pip vllm, no docker)
 ./run.sh chandra    # starts `vllm serve datalab-to/chandra-ocr-2` (pip vllm, no docker)
 
@@ -55,6 +55,17 @@ python scripts/compare.py
 
 Restrict to specific PDFs: `./run.sh got_ocr --pdfs Handwritten Flowchart`.
 Override batching: `./run.sh dots_ocr --batch-size 8`.
+
+**Run mineru on vLLM, not on its default in-process engine.** Plain `./run.sh mineru`
+resolves to the transformers engine, which does not just run slow — it runs a *different
+decoding recipe* than mineru intends, because the transformers client silently drops the
+`presence_penalty`/`frequency_penalty` that `mineru_vl_utils` sets for every content type
+(the library marks them `# not supported by hf`). Over the 68-page set the served path is
+**6.4x faster (72.4 → 11.4 s/page) and extracts *more* text** (190,218 → 201,262 chars);
+on `Flowchart` the in-process path recovers 2 of 3 mermaid graphs where vLLM recovers 3.
+`MINERU_VLLM=1` serves the model from `models/vllm_server` on :8400 and the `--out-tag`
+keeps the two runs from overwriting each other. CLAUDE.md has the full analysis, plus the
+`config.json` patch (`scripts/mineru_vllm_model.py`) vLLM needs to load these weights.
 
 **Re-running the same command resumes.** Per-page models write
 `outputs/<model>/<stem>/pages/page_NNNN.meta.json` *last*, as the page's done-marker;
@@ -106,7 +117,7 @@ HF repo ids per model, for the reclaim call:
 | unlimited_ocr | `baidu/Unlimited-OCR` |
 | paddleocr_vl | (paddle caches under `~/.paddlex`, not HF) |
 | glm_ocr | `zai-org/GLM-OCR` + PP-DocLayout-V3 |
-| mineru | `opendatalab/MinerU2.5-2509-1.2B` |
+| mineru | `opendatalab/MinerU2.5-Pro-2605-1.2B` (what mineru 3.x actually pulls; served from a config-patched copy in `work/mineru2.5_vllm/`) |
 | surya | `datalab-to/surya-ocr-2` |
 | chandra | `datalab-to/chandra-ocr-2` |
 
@@ -120,7 +131,7 @@ HF repo ids per model, for the reclaim call:
 | Unlimited-OCR (Baidu) | transformers, `trust_remote_code` | markdown/text | no (1 img/call); `infer_multi` batches whole pdf in one forward pass | uses card's exact recipe (`base_size=1024, image_size=640, crop_mode=True`) — your earlier bad pages were likely a size/prompt mismatch |
 | PaddleOCR-VL-1.6 | paddlepaddle-gpu 3.2.1 | markdown + layout json | pipeline-internal | best-in-class for tables/formulas per OmniDocBench |
 | GLM-OCR | glmocr[selfhosted] (+ PP-DocLayout-V3) | markdown + json (bboxes) | pipeline-internal | layout model can run on CPU (`LAYOUT_DEVICE=cpu`) to save VRAM |
-| MinerU 2.5 | `mineru[core]`, vlm-transformers backend | markdown + content_list.json | pipeline-internal | checkpoints per-pdf |
+| MinerU 2.5 | `mineru[core]`, **`vlm-http-client` against a pip-vllm server** (`MINERU_URL`); the default in-process engine changes the output, see above | markdown + content_list.json | vLLM continuous batching | checkpoints per-pdf. **Only model here that reads a flowchart's topology** — emits it as mermaid (`graph TD`, arrows intact) despite having a layout stage |
 | Surya 2 | external pip-vllm server (`SURYA_INFERENCE_URL`) | block json incl. **per-block confidence**, markdown via markdownify | vLLM continuous batching | only model here with a native quality score |
 | Chandra OCR 2 | external pip-vllm server (its own docker launcher swapped for a plain `vllm serve`) | markdown + html + metadata json (token counts) | vLLM continuous batching (`--batch-size`) | checkpoints per-pdf |
 
@@ -135,7 +146,11 @@ Driver 570.x / CUDA 12.8, one A40 (46 GB VRAM). **torch must stay `<2.11`**: 2.1
 ships `+cu130` wheels that need driver >= 580. Every model pins `torch>=2.10,<2.11`
 for this reason, and it is also why the in-process-vLLM adapters were rewritten onto
 plain transformers — vLLM 0.20+ pins torch 2.11. vLLM 0.19.1 (torch 2.10 / cu128)
-is the newest that runs here, and it is used only by surya/chandra via a served endpoint.
+is the newest that runs here, and it is never imported in-process: `models/vllm_server`
+serves it over HTTP to mineru, surya and glm_ocr (chandra carries its own). Note that
+0.19.1 predates the transformers-v5 nested config layout, so a model whose `config.json`
+nests fields under `text_config` can fail to load — see the `tie_word_embeddings` case in
+CLAUDE.md, which is why mineru is served from a patched copy of its config.
 
 Disk is the tighter constraint. `/workspace` is a MooseFS mount with **no hardlink
 support**, so `uv` *copies* rather than links out of its cache — every `uv sync`

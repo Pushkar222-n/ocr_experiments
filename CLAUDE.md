@@ -80,6 +80,13 @@ Done, full 68-page set, verified:
 | `got_ocr` | ~8.2 | 13.4 GB | native format is **mathpix LaTeX**, not markdown (`\title{}`, escaped `\&`) despite the `.md` extension. **Treat its char counts as inflated** — see below |
 | `unlimited_ocr` | ~25.0 | 10.7 GB | 184,140 chars. Native format is grounding tags + HTML tables (`<\|det\|>text [x,y,x,y]<\|/det\|>`), not markdown. Needs `max_length=4096` or it hangs; 6/68 pages hit that cap, all in `Complex_table_layouts`. Capped pages are **under**-counted — see below |
 | `paddleocr_vl` | ~25.5 | 17.6 GB | 422,808 raw chars but only ~88.8k visible — inline CSS on **every** `<td>`. Lowest real extraction on `Complex_table_layouts` (46,456) despite the highest raw count (266,794); highest on `printouts` (10,760). Has a layout stage → skips diagrams |
+| `mineru` | **~11.4** | n/a* | **Run it on vLLM — the transformers engine changes the *output*, not just the speed (see below).** 201,262 chars. The **only** model that reads a flowchart's topology: emits it as **mermaid** (`graph TD`, arrows intact) despite having a layout stage. Native output: markdown + `content_list.json`. Row comes from `outputs/mineru/output_vllm/`; the 72.4 s/page transformers run in `outputs/mineru/` is a kept artifact, **not** the benchmark row |
+
+\* `mineru`'s VRAM is not measurable the same way as the others: under `vlm-http-client`
+the weights live in a vLLM server that preallocates its KV pool to
+`--gpu-memory-utilization` (0.7 -> ~32 GB), so the sampled 32.2 GB is a *reservation*, not
+demand. The transformers run measured 13.7 GB of genuine demand, but that engine is not
+the one we benchmark. Leave the cell blank rather than print a misleading number.
 
 **Finding worth keeping**: on `Flowchart`, `dots_ocr` produced **626 chars** vs
 `lightonocr`'s **4846** (7.7x). dots.mocr's `prompt_layout_all_en` appears to drop text
@@ -112,12 +119,100 @@ Scoreboard on the single most discriminating page in the set:
 | `paddleocr_vl` | 609 | 161 | yes — `<img src=...>` |
 | `got_ocr` | 234 | 236 | no, but degenerate |
 
-**Still to check: `glm_ocr` and `mineru`** — both run a layout model first, so both are
-predicted to skip diagrams. If either reads inside the shapes, that is the interesting
-model for diagram-heavy documents and worth calling out. Costs nothing: just read its
-`Flowchart` output. Corollary: on such documents `total_chars` and `visible_chars`
-measure *whether the model has a layout stage*, not how well it reads — and no tuning
-moves a model across that line.
+**Still to check: `glm_ocr`** — it runs a layout model first, so it is predicted to skip
+diagrams. If it reads inside the shapes, that is worth calling out. Costs nothing: just
+read its `Flowchart` output. Corollary: on such documents `total_chars` and
+`visible_chars` measure *whether the model has a layout stage*, not how well it reads —
+and no tuning moves a model across that line.
+
+**ANSWERED for `mineru`, and it breaks the pattern: it is the only model that reads the
+flowchart's *topology*.** It has a layout stage and still does not skip the diagram — it
+emits the process graph as **mermaid** (`graph TD`, `A[...] --> B[...]`) inside a
+`<details>` block, alongside the extracted image. Nothing else here recovers the arrows.
+The trap: on raw `total_chars` mineru (5069) "loses" to `lightonocr` (4916 with **no**
+layout stage, which merely flattens the diagram into loose text). Char count actively
+**mis-ranks this document** — do not let the final table imply mineru underperformed.
+
+**mineru must be benchmarked on vLLM, not transformers — the engine changes the OUTPUT,
+not just the speed.** This is the sharpest gotcha in the repo. `mineru_vl_utils` sets
+per-block-type sampling params (`mineru_client.py:69-75`): `chart`, `image`, `table`,
+`equation` and `[default]` all decode with **`presence_penalty=1.0` +
+`frequency_penalty=0.05`**. The transformers client **never references either field** —
+they appear nowhere in `transformers_client.py`, and the library admits it at
+`base_client.py:32-33`: `# not supported by hf`. The http client sends both
+(`http_client.py:273-276`). So the transformers path silently drops half of MinerU's own
+decoding recipe — precisely the half that suppresses repetition and keeps the decoder
+emitting distinct tokens, which is what a long mermaid graph of many distinct nodes needs.
+
+Measured over the **full 68-page set**, same weights, engine the only variable
+(`outputs/mineru/` vs `outputs/mineru/output_vllm/`):
+
+| pdf | pages | s/pg transformers | s/pg vLLM | speedup | chars tf | chars vLLM |
+|---|---|---|---|---|---|---|
+| `Complex_table_layouts` | 32 | 92.6 | **5.43** | **17.1x** | 122,100 | 131,172 |
+| `Handwritten` | 14 | 38.2 | **10.60** | 3.6x | 26,056 | 26,223 |
+| `Formulas_with_tables` | 12 | 34.5 | **11.79** | 2.9x | 21,073 | 20,944 |
+| `printouts` | 7 | 56.7 | **23.93** | 2.4x | 18,201 | 17,854 |
+| `Flowchart` | 3 | 205.3 | **47.27** | 4.3x | 2,788 | **5,069** |
+| **TOTAL** | **68** | **72.4** | **11.37** | **6.4x** | 190,218 | **201,262** |
+
+Wall clock **82.1 min -> 12.9 min**, and extraction went *up* by 11,044 chars — the speed
+costs nothing. On `Flowchart` the transformers path recovered **2 of 3** mermaid graphs;
+vLLM recovers **3 of 3**.
+
+The **per-document speedup varies 2.4x-17.1x, and that spread is an artifact, not signal**:
+the mineru CLI pays ~100 s of *fixed* startup (imports, layout model, its internal FastAPI)
+before decoding a single page, and that dominates a short document. Only
+`Complex_table_layouts` (32 p) is long enough to amortize it, which is why it alone shows
+the engine's true margin. Read the 17.1x, not the 2.4x, as the real cost of the
+transformers path — and never quote a s/page from a 3-page document.
+
+On page 3 the transformers path **gave up on the graph and emitted a prose summary**
+("This flowchart illustrates the manufacturing process for a quality assurance
+department...") where vLLM produced a full 21-node mermaid graph. That is a decode
+degeneration caused by the missing penalties, not a layout call. **The transformers run
+therefore under-measures mineru on both quality and speed, and is invalid as a benchmark
+row.** Its outputs are kept at `outputs/mineru/` as a documented engine artifact; the row
+that counts is `outputs/mineru/output_vllm/` (`--out-tag` keeps them from colliding).
+
+Do not read `max_gpu_mem_mb` across the two: under `vlm-http-client` the weights live in a
+vLLM server that preallocates its KV pool to `--gpu-memory-utilization` (0.7 -> ~32 GB),
+so the number is a reservation, not demand. Only the timings are comparable.
+
+Also do not read the 3-page `47.3 s/page` as mineru's true rate: the mineru CLI pays a
+large *fixed* startup (~100 s of that 141.8 s went to imports, the layout model and its
+internal FastAPI before a single page was decoded). It amortizes over a long document —
+which is the whole reason the benchmark row comes from the full 68-page run.
+
+**vLLM 0.19.1 cannot load MinerU2.5 straight from the hub — patch the config.** The
+architecture *is* supported (it resolves `Qwen2VLForConditionalGeneration`), but weight
+loading dies:
+
+    ValueError: Following weights were not initialized from checkpoint:
+                {'language_model.lm_head.weight'}
+
+MinerU2.5 **ties** lm_head to the input embeddings — the checkpoint has 681 tensors,
+`model.embed_tokens.weight` present, **no lm_head at all**. vLLM only expected one because
+`qwen2_vl.py:1251` hands the *flat* top-level config to `Qwen2ForCausalLM`, which checks
+`config.tie_word_embeddings` at `qwen2.py:555`. MinerU2.5 ships the **transformers-v5
+nested** layout: the flag is `true` inside `text_config` and there is **no top-level key**,
+so `PretrainedConfig` defaults it to `False` and vLLM builds a standalone head it has no
+weights for. Transformers reads the nested value and ties correctly — which is exactly why
+the in-process baseline worked and vLLM did not.
+
+`scripts/mineru_vllm_model.py` fixes this: it symlinks the HF snapshot into
+`work/mineru2.5_vllm/` and rewrites **only** `config.json`, hoisting the flag to the top
+level (no weights copied; the volume has no hardlinks but symlinks work). It does not
+change the model — it makes vLLM tie the head the way transformers already did. It
+hard-fails rather than guessing if a future checkpoint drops the nested field. `run.sh`
+serves that directory, never the hub id. **Do not patch the HF cache in place — a
+re-download silently reverts it.**
+
+**Expect this class of bug again on `surya` and `chandra`.** Same vLLM 0.19.1, same
+loader. Any model whose config uses the transformers-v5 nested layout will hit the same
+top-level-vs-nested mismatch, and any model with tied embeddings will hit it on `lm_head`.
+If a `vllm serve` dies during weight loading, check the config shape before assuming the
+architecture is unsupported.
 
 **Finding worth keeping**: `got_ocr` degenerates into token loops on 5 of 68 pages —
 two repeat a SMILES fragment (`[C@@H]1`) into a table, one loops a LaTeX column spec
@@ -141,10 +236,12 @@ other adapter that stops on a string rather than a token id.
 
 Remaining, in this order (the vLLM-server models last — see the regrouping note):
 
-1. `mineru` — `vlm-transformers` backend. **Never started.** Its venv was never built on
-   the previous pod; nothing to resume, nothing to clean.
-2. `surya` — rebuild `models/vllm_server/.venv` (~14 GB, deleted to free space; the
-   `uv.lock` is committed). `run.sh` serves on :8100.
+1. `mineru` — **transformers baseline done (68 pages, 72.4 s/page) but superseded; the
+   vLLM re-run into `outputs/mineru/output_vllm/` is the row that counts.** See the
+   engine-changes-the-output finding above. `MINERU_VLLM=1 ./run.sh mineru --backend
+   vlm-http-client --out-tag output_vllm`.
+2. `surya` — `models/vllm_server/.venv` is **now built** (vllm 0.19.1, done for mineru's
+   vLLM run). `run.sh` serves on :8100. Read the config-shape gotcha above first.
 3. `glm_ocr` — **needs a served endpoint; see below.** Run it right after `surya` so the
    `models/vllm_server/.venv` gets built once, not twice.
 4. `chandra` — carries its **own** vLLM (~14 GB) in its venv; `run.sh` serves on :8200.
