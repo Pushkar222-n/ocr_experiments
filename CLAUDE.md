@@ -82,6 +82,27 @@ Done, full 68-page set, verified:
 | `paddleocr_vl` | ~25.5 | 17.6 GB | 422,808 raw chars but only ~88.8k visible — inline CSS on **every** `<td>`. Lowest real extraction on `Complex_table_layouts` (46,456) despite the highest raw count (266,794); highest on `printouts` (10,760). Has a layout stage → skips diagrams |
 | `mineru` | **~11.4** | n/a* | **Run it on vLLM — the transformers engine changes the *output*, not just the speed (see below).** 201,262 chars. The **only** model that reads a flowchart's topology: emits it as **mermaid** (`graph TD`, arrows intact) despite having a layout stage. Native output: markdown + `content_list.json`. Row comes from `outputs/mineru/output_vllm/`; the 72.4 s/page transformers run in `outputs/mineru/` is a kept artifact, **not** the benchmark row |
 
+| `surya` | **~4.1** | 24.6 GB | **Fastest model in the set** (68 p in 4.6 min). 112,004 chars. Served from `models/vllm_server` on :8100; arch resolves as `Qwen3_5ForConditionalGeneration`, loads clean — no config patch needed. Only model reporting a **confidence** score — but read the trap below before using it |
+
+**`surya`'s confidence is NOT a coverage metric, and it will mislead you.** It is the one
+model here that self-reports quality, which makes it tempting as a quality gate. Do not
+use it as one. Two things are true:
+
+- **It is page-level, not per-block.** Every block on a page carries an *identical*
+  confidence value (verified: `distinct_confidences=1` on every page checked). The
+  adapter's `mean_confidence` is therefore averaging copies of a single number, not
+  aggregating block scores. It cannot tell you *which* block was hard.
+- **It scores what surya chose to read, never whether it read everything.** On `Flowchart`
+  surya dropped the entire diagram — 571 chars vs mineru's 5069 — and still reported
+  **0.947**, indistinguishable from the 0.95-0.98 it reports on documents it reads fully.
+  A page where the whole diagram silently vanished looks healthy.
+
+Mechanism, same layout-stage collapse as `dots_ocr`/`unlimited_ocr`/`paddleocr_vl`: surya
+labels the diagram and **emits no html at all** for it. Across all 68 pages —
+**`Picture` 45/45 empty, `Figure` 6/6 empty, `Diagram` 3/3 empty**, every one. It never
+attempts them; it renders `![]()` and moves on. That is a layout decision, not a decode
+failure, and no confidence number will ever flag it.
+
 \* `mineru`'s VRAM is not measurable the same way as the others: under `vlm-http-client`
 the weights live in a vLLM server that preallocates its KV pool to
 `--gpu-memory-utilization` (0.7 -> ~32 GB), so the sampled 32.2 GB is a *reservation*, not
@@ -113,11 +134,18 @@ Scoreboard on the single most discriminating page in the set:
 
 | model | raw | visible | layout stage? |
 |---|---|---|---|
-| `lightonocr` | 4846 | **4588** | no — reads everything |
+| `mineru` (vLLM) | **5069** | **4842** | yes — **and reads it anyway, as mermaid** |
+| `lightonocr` | 4846 | 4588 | no — reads everything |
 | `unlimited_ocr` | 684 | 683 | yes — `![](images/0.jpg)` |
 | `dots_ocr` | 626 | 618 | yes — `Picture`, no `text` key |
 | `paddleocr_vl` | 609 | 161 | yes — `<img src=...>` |
+| `surya` | 571 | ~560 | yes — `Picture`/`Diagram`, **empty html**, conf still 0.947 |
 | `got_ocr` | 234 | 236 | no, but degenerate |
+
+**`mineru` is the counter-example that breaks the "layout stage ⇒ skips diagrams" rule.**
+It has a layout stage and reads the diagram anyway. So the rule is not "layout pipelines
+cannot read diagrams" — it is that most of them *choose* not to. That is a product
+decision, not an architectural limit, and mineru proves the ceiling is higher.
 
 **Still to check: `glm_ocr`** — it runs a layout model first, so it is predicted to skip
 diagrams. If it reads inside the shapes, that is worth calling out. Costs nothing: just
@@ -240,18 +268,29 @@ Remaining, in this order (the vLLM-server models last — see the regrouping not
    vLLM re-run into `outputs/mineru/output_vllm/` is the row that counts.** See the
    engine-changes-the-output finding above. `MINERU_VLLM=1 ./run.sh mineru --backend
    vlm-http-client --out-tag output_vllm`.
-2. `surya` — `models/vllm_server/.venv` is **now built** (vllm 0.19.1, done for mineru's
-   vLLM run). `run.sh` serves on :8100. Read the config-shape gotcha above first.
+2. `surya` — **done** (68 pages, 4.06 s/page, the fastest model here). Loaded on vLLM with
+   no config patch needed. See the confidence-is-not-coverage trap above.
 3. `glm_ocr` — **needs a served endpoint; see below.** Run it right after `surya` so the
    `models/vllm_server/.venv` gets built once, not twice.
 4. `chandra` — carries its **own** vLLM (~14 GB) in its venv; `run.sh` serves on :8200.
    Run the others first, reclaim fully, then `chandra` — never two vLLMs resident.
 5. `python scripts/compare.py`
 
-## Resuming on a fresh pod (state as of 2026-07-10)
+## Resuming on a fresh pod (state as of 2026-07-11)
 
-**5 of 9 models are done**: `lightonocr`, `dots_ocr`, `got_ocr`, `unlimited_ocr`,
-`paddleocr_vl` — each a verified 68 pages (32/3/12/14/7).
+**7 of 9 models are done**: `lightonocr`, `dots_ocr`, `got_ocr`, `unlimited_ocr`,
+`paddleocr_vl`, `mineru` (the **vLLM** run — see above), `surya` — each a verified 68
+pages (32/3/12/14/7). Left: `glm_ocr`, then `chandra`, then `scripts/compare.py`.
+
+**Disk bit us mid-benchmark and will again.** The RunPod volume quota is ~50 GB and is
+*not* visible in `df` (which reports the whole MooseFS cluster, showing hundreds of TB
+free — ignore it). Use `du -sh /workspace`. A surya `uv sync` was silently killed at 29 GB
+used, leaving a half-written venv and a log that just stopped — **no error message, no
+"No space" line**. If a sync dies quietly, suspect the quota first.
+`scripts/reclaim.sh mineru opendatalab/MinerU2.5-Pro-2605-1.2B` freed 22.9 GB (11 GB venv +
+10.6 GB uv cache + weights) and the retry then worked first try. Note `models/vllm_server/.venv`
+alone is **15 GB** — keep it until `glm_ocr` is done (both serve through it), and reclaim it
+*before* `chandra`, which carries its own ~14 GB vLLM. Two vLLM venvs resident will not fit.
 
 The pod that produced them was torn down. Nothing is resident: no venvs, no `uv` cache,
 no HF weights, no `work/`. Every remaining model therefore starts from a cold download —
