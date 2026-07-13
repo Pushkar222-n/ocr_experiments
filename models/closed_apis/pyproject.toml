@@ -1,0 +1,10 @@
+[project]
+name = "closed-apis-run"
+version = "0.0.0"
+requires-python = ">=3.10"
+# All four providers are hit over plain REST (requests) — no vendor SDKs, so nothing
+# to keep in lockstep with a torch/transformers pin and no version churn. The runner
+# needs no GPU; it can run on the pod or anywhere with the API keys in ../../.env.
+dependencies = [
+    "requests>=2.31",
+]

@@ -30,3 +30,13 @@ outputs/
 .ipynb_checkpoints/
 data
 
+# frontend (npm)
+frontend/node_modules/
+frontend/dist/
+
+
+# rasterized pdf page images (regenerable via frontend/rasterize.sh)
+frontend/public/pdf-pages/
+
+# secrets — never commit
+.env

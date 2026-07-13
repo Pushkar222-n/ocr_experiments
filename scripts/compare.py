@@ -59,11 +59,28 @@ def summaries():
             yield model, summary
 
 
+def closed_summaries():
+    """Closed/paid API runs live one level deeper, under outputs/closed/<provider>/, so
+    they are invisible to the open glob above and stay a separate experiment. We fold them
+    into the same comparison table (tagged closed=True) so the frontend metrics view reads
+    one file — they carry billed_pages / credits / cost_usd from closed_apis/run.py."""
+    for summary in sorted((OUTPUTS / "closed").glob("*/summary.json")):
+        yield summary.parent.name, summary
+
+
 def main():
     rows = []
     for model, summary in summaries():
         for doc in json.loads(summary.read_text()):
             row = {"model": model, **doc}
+            stem = Path(doc.get("pdf", "")).stem
+            got = text_ratio(summary.parent / f"{stem}.md")
+            if got is not None:
+                row["visible_chars"], row["pct_text"] = got
+            rows.append(row)
+    for model, summary in closed_summaries():
+        for doc in json.loads(summary.read_text()):
+            row = {"model": model, "closed": True, **doc}
             stem = Path(doc.get("pdf", "")).stem
             got = text_ratio(summary.parent / f"{stem}.md")
             if got is not None:

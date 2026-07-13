@@ -531,3 +531,88 @@ a unified "peak" column would silently overstate the per-pdf models' footprint.
 - Verify a run by page count (`32/3/12/14/7`) *and* by eyeballing the markdown, not by
   exit code alone.
 - Never delete `outputs/`. Reclaim only venvs, the uv cache, and HF weights.
+
+## Closed / paid API models (state as of 2026-07-12)
+
+A separate experiment: four hosted document-parse APIs on their **balanced** (mid) tier,
+run over the *same* 68-page `sample_set`. Code: `models/closed_apis/run.py` (one uv
+project, plain `requests`, no vendor SDKs). Keys live in `.env` (gitignored — it holds
+live secrets and this repo is public). Outputs are stored **separately** under
+`outputs/closed/<provider>/` (same file shapes as the open models: `<stem>.md`,
+`<stem>.native.json` = full API response, `<stem>.metrics.json`, `summary.json`) so the
+closed experiment never mixes into the open `outputs/<model>/` tree.
+
+Run: `cd models/closed_apis && uv run python run.py all --concurrency 3` (or a single
+provider: `... run.py datalab`). `--smoke` writes to `outputs/closed/_smoke/`. Per-pdf
+checkpoint: a finished `<stem>.md` is not re-fetched (these cost money). Each provider
+takes the whole PDF in one job and returns all pages, so concurrency is across the 5 PDFs.
+
+Balanced tier chosen per provider (NOT their premium option):
+- `mistral` → `mistral-ocr-latest`
+- `datalab` → hosted Marker, `use_llm=false` (the non-LLM base tier)
+- `llamaparse` → `parse_mode=parse_page_with_agent` (the "Balanced" preset, gemini-2.5-flash)
+- `landing_ai` → ADE `dpt-2-latest`
+
+Full 68-page results (weighted s/page = whole-PDF wall clock, not GPU decode):
+
+| provider | s/page | raw chars | **visible** | $/1k pages | cost / 68p | $ per 10k visible |
+|---|---|---|---|---|---|---|
+| `datalab` | 0.96 | 266,456 | **149,941** | **$3.00** | **$0.204** | **$0.014** |
+| `mistral` | **0.49** | 123,134 | 106,909 | $4.00 | $0.272 | $0.025 |
+| `llamaparse` | 14.31 | 291,707 | 144,455 | $12.50 | $0.850 | $0.059 |
+| `landing_ai` | 2.04 | 259,384 | 90,404 | $30.00 | $2.040 | $0.226 |
+
+Actual spend for the run: **$3.37**.
+
+**Datalab Marker wins outright and it is not close.** It extracts the most visible text of
+anything in this repo, open or closed (149,941 vs the best open model `mineru` at 128,299),
+is the **cheapest** paid API, and is near-fastest. On cost-per-text it is **16x better than
+`landing_ai`**. It also recovers flowchart edges.
+
+**`landing_ai` is the trap of the closed set**: metered at exactly 3 credits/page x $0.01 =
+**$30/1k pages — 10x Datalab — for 40% LESS text** than Datalab. Nothing recommends it here.
+**`mistral` is the speed/cost floor** (0.49 s/page, $4/1k) and is genuinely good on
+text/tables/formulas, but it is **not a diagram parser** (flowchart -> 724 chars, zero arrows).
+**`llamaparse` (Agentic) recovers the most flowchart edges (58)** and near-Datalab text, but
+costs 4x Datalab and is **15-30x slower** (14 s/page; 568 s on the 32-page doc).
+
+### Pricing, verified 2026-07-12 (`uv run python run.py prices`)
+
+Rates were read off each vendor's public pricing page. **An earlier version of this file
+understated every one of them** (mistral was quoted at $1/1k when it is $4/1k; llamaparse's
+Agentic tier is 10 credits/page, not 3). Costs are recomputed from the usage the APIs already
+reported via `run.py reprice`, which never re-calls the network — re-running to refresh a cost
+column would mean paying for the same pages twice.
+
+| provider | tier | $/1k pages | 68p | |
+|---|---|---|---|---|
+| `mistral` | OCR (`mistral-ocr-latest`) | $4.00 | $0.272 | **<- run** |
+| `mistral` | Document AI | $5.00 | $0.340 | premium |
+| `datalab` | Marker base (`use_llm=false`) | ~$3.00 | $0.204 | **<- run**, *unconfirmed* |
+| `datalab` | High Accuracy (`use_llm=true`) | $6.00 | $0.408 | premium |
+| `llamaparse` | Fast (`parse_page_without_llm`) | $1.25 | $0.085 | 1 cr/pg |
+| `llamaparse` | Cost-effective (`parse_page_with_llm`) | $3.75 | $0.255 | 3 cr/pg |
+| `llamaparse` | Agentic (`parse_page_with_agent`) | $12.50 | $0.850 | **<- run**, 10 cr/pg |
+| `llamaparse` | Agentic Plus (sonnet) | $56.25 | $3.825 | premium, 45 cr/pg |
+| `landing_ai` | ADE `dpt-2-latest` | $30.00 | $2.040 | **<- run**, 3 cr/pg |
+
+Credit rates: LlamaParse **$1.25 / 1000 credits**; Landing AI Explore **$1 = 100 credits**
+($0.01/cr; the $250/mo Team plan only gets you to $0.0091/cr = ~$27/1k).
+
+**The one soft number is Datalab's base rate.** Their pricing page is client-rendered, there
+is no usage endpoint on the API, and the base `use_llm=false` rate is not published anywhere
+fetchable. $6/1k for High Accuracy **is** confirmed (their blog). The $3/1k base is flagged
+`unconfirmed: True` in `PRICING` — verify it before quoting, because Datalab winning on cost
+depends on it (it still wins on text at any plausible rate).
+
+**LlamaParse's free tier (10k credits/month) absorbed this run**, so its API honestly reported
+**0 credits**. The cost shown is the list rate, not a metered charge. Landing AI *did* meter:
+204 credits for 68 pages, exactly 3/page.
+
+`scripts/compare.py` folds the closed rows into `outputs/comparison.json` (tagged
+`closed:true`, one level deeper under `outputs/closed/*/summary.json`), so the frontend
+metrics view reads one file. The frontend groups them under a **paid API** section in the
+compare picker (dashed chips, `$` flag), shows per-document cost/credits badges on each
+pane, and adds a **Cost** bar card + `cost_usd`/`billed_pages`/`credits` columns in metrics.
+Closed outputs are gitignored (under `outputs/`) like the open ones — carry them in the
+resume bundle, not the repo.

@@ -116,6 +116,26 @@ MINERU_VLLM=1 ./run.sh mineru --backend vlm-http-client --out-tag output_vllm  #
 python scripts/compare.py
 ```
 
+## Closed / paid API models
+
+Four hosted document-parse APIs (Mistral OCR, Datalab Marker, LlamaParse, Landing AI ADE)
+on their **balanced** mid-tier, over the same `sample_set`. Separate project, separate
+storage (`outputs/closed/<provider>/`), plain `requests` (no vendor SDKs). Keys go in
+`.env` (gitignored). See the "Closed / paid API models" section of `CLAUDE.md` for the
+full results — headline: **Datalab Marker wins outright**: more visible text than any open
+model here (149,941 vs MinerU's 128,299), the cheapest paid API ($3/1k pages, $0.20 for all
+68), and near-fastest. `landing_ai` is the trap — $30/1k for the *least* text of the four.
+
+```bash
+# keys in .env: DATALAB_API_KEY, LANDING_API_KEY, MISTRAL_API_KEY, LLAMAPARSE_API_KEY
+cd models/closed_apis
+uv run python run.py all --concurrency 3          # all four providers, 5 pdfs each
+uv run python run.py datalab --smoke --pdfs Flowchart   # cheap single-provider smoke
+uv run python run.py prices                       # every tier's rate + cost for the 68p set
+uv run python run.py reprice                      # recompute stored costs offline (no API calls)
+cd ../.. && python scripts/compare.py             # folds closed rows into comparison.json
+```
+
 Restrict to specific PDFs: `./run.sh got_ocr --pdfs Handwritten Flowchart`.
 Override batching: `./run.sh dots_ocr --batch-size 8`.
 
