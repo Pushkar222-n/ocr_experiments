@@ -6,6 +6,12 @@ requires-python = ">=3.10"
 dependencies = [
     "pypdfium2>=4.30",
     "pillow>=10",
+    "numpy",
+    "pypdf>=4",
+    # page-rotation correction (orient_pdf): PP-LCNet 4-class doc-orientation classifier,
+    # onnxruntime backend so no model here needs paddlepaddle or a GPU for this.
+    "paddleocr>=3.7",
+    "onnxruntime",
 ]
 
 [build-system]

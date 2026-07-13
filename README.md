@@ -69,7 +69,8 @@ with 422,808 chars and lands **8th of 9** on real text, because it puts inline C
 
 ```
 harness/            shared lib: pdf->page-png rendering, per-page checkpointing,
-                     timing/GPU-mem metrics, output assembly (ocr_harness package)
+                     timing/GPU-mem metrics, output assembly, page-rotation
+                     correction (ocr_harness package)
 models/<name>/       one uv project per model — isolated venv, own torch/
                      transformers/vllm/paddle pins, no cross-model version conflicts
 outputs/<name>/      <pdf_stem>.md (+ native .json/.html), <pdf_stem>.metrics.json,
@@ -94,6 +95,32 @@ unzip -q ocr_resume_bundle.zip               # on the new pod, at repo root
 Each model is its own `uv` project so torch/transformers/vllm/paddle versions never
 collide — `uv sync --project models/<x>` only ever touches `models/<x>/.venv`.
 
+## Page-rotation correction (`ocr_harness.orient_pdf`)
+
+Any model adapter can call `harness.orient_pdf(pdf_path)` before handing a pdf to its
+model (or before rendering pages) to detect and fix pages that were scanned sideways.
+It uses PaddleOCR's `PP-LCNet_x1_0_doc_ori` — a tiny 4-class (0/90/180/270)
+doc-orientation classifier — on the **onnxruntime** backend, so it needs neither
+paddlepaddle nor a GPU. It's declared in `harness/pyproject.toml` (not per-model), so
+every model's venv gets it transitively through the `ocr-harness` editable dependency.
+
+`orient_pdf` renders each page, classifies it, and — only for pages that need it —
+writes a corrected copy of the pdf under `work/oriented/<stem>.pdf` with that page's
+`/Rotate` attribute fixed. Any renderer that honors `/Rotate` (pypdfium2, and chandra's
+own pdf loader) then renders it upright automatically; nothing else about the pdf
+changes. Cached on (size, mtime), and a per-pdf report lands at
+`work/oriented/<stem>.json` (`flagged_pages`, per-page angle + confidence). If any page
+was flagged, before/after preview pngs are saved to
+`work/oriented_preview/<stem>/page_NNNN_{before,after}.png` so you can eyeball the fix
+before trusting it.
+
+Checked against the real `sample_set`: only `Complex_table_layouts.pdf` has rotated
+pages — **7 of 32** (pages 3, 4, 25, 26 at 270°; pages 8, 13, 14 at 90°; confidence
+0.83–0.93). Visually confirmed correct in both rotation directions.
+
+`models/chandra/run.py` is the first (and so far only) caller — see CLAUDE.md for how
+it's wired in and what's left to verify against real OCR output.
+
 ## Running a model
 
 `./run.sh <model>` syncs that model's venv, starts a vLLM server if the model needs
@@ -112,6 +139,8 @@ UNLIMITED_MULTI=1 uv run --project models/unlimited_ocr python models/unlimited_
 MINERU_VLLM=1 ./run.sh mineru --backend vlm-http-client --out-tag output_vllm  # see below
 ./run.sh surya      # starts `vllm serve datalab-to/surya-ocr-2` (pip vllm, no docker)
 ./run.sh chandra    # starts `vllm serve datalab-to/chandra-ocr-2` (pip vllm, no docker)
+./run.sh chandra --out-tag oriented   # same, + rotation-correction (see above), --include-headers-footers,
+                                      # and tuned vLLM flags; writes outputs/chandra/oriented/, baseline untouched
 
 python scripts/compare.py
 ```
@@ -216,7 +245,7 @@ HF repo ids per model, for the reclaim call:
 | GLM-OCR | glmocr[selfhosted] (+ PP-DocLayout-V3) | markdown + json (bboxes) | pipeline-internal | layout model can run on CPU (`LAYOUT_DEVICE=cpu`) to save VRAM |
 | MinerU 2.5 | `mineru[core]`, **`vlm-http-client` against a pip-vllm server** (`MINERU_URL`); the default in-process engine changes the output, see above | markdown + content_list.json | vLLM continuous batching | checkpoints per-pdf. **Extracts the most real text of any model here** (128,299 visible). Reads a flowchart's topology as mermaid — one of only two that do, and the weaker of the two (no feedback loops) |
 | Surya 2 | external pip-vllm server (`SURYA_INFERENCE_URL`) | block json incl. **per-block confidence**, markdown via markdownify | vLLM continuous batching | fastest model here (4.1 s/page). Its confidence is **page-level and is not a coverage metric** — it scored 0.947 on a page where it dropped the whole diagram. Do not gate on it |
-| Chandra OCR 2 | external pip-vllm server (its own docker launcher swapped for a plain `vllm serve`); carries its **own** vllm (~15 GB) — run it last | markdown + html + metadata json (token counts) | vLLM continuous batching (`--batch-size`) | checkpoints per-pdf. **Best diagram parser in the field** — 24 nodes / 55 edges / 10 feedback loops on `Flowchart` vs mineru's 21/40/0 — but fences the mermaid *bare*, so it will not auto-render |
+| Chandra OCR 2 | external pip-vllm server (its own docker launcher swapped for a plain `vllm serve`); carries its **own** vllm (~15 GB) — run it last | markdown + html + metadata json (token counts) | vLLM continuous batching (`--batch-size`) | checkpoints per-pdf. **Best diagram parser in the field** — 24 nodes / 55 edges / 10 feedback loops on `Flowchart` vs mineru's 21/40/0 — but fences the mermaid *bare*, so it will not auto-render. `run.py` now runs every pdf through `harness.orient_pdf` first (see above) and always passes `--include-headers-footers`; `run.sh` serves it with `--max-model-len 18000` + `--mm-processor-kwargs` (datalab's own recommended values — see CLAUDE.md for why the vendor's other two flags were deliberately left out). Re-run tagged `--out-tag oriented`, not yet verified end to end — see CLAUDE.md Status |
 
 Surya's and Chandra's docs default to a `docker run vllm`/`chandra_vllm` launcher —
 since RunPod pods can't do docker-in-docker, `run.sh` instead does

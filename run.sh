@@ -134,10 +134,28 @@ case "$MODEL" in
         fi
         ;;
     chandra)
+        # --max-model-len and --mm-processor-kwargs come from datalab's own launcher
+        # (chandra/scripts/vllm.py, which run.sh can't use directly -- no docker-in-docker
+        # on this pod). --max-model-len 18000 replaces vLLM's auto-derived default, which
+        # is the base model's raw max_position_embeddings (262144) -- wildly oversized for
+        # a page here (measured max 4621 output tokens; ~6144 vision tokens at the client's
+        # own 3072x2048 resize cap). --mm-processor-kwargs matches that same 3072x2048 cap,
+        # so it is provably a no-op given the client already enforces it, but it's free and
+        # matches the vendor config exactly. Deliberately NOT setting the vendor's
+        # H100-scaled --max-num-batched-tokens/--max-num-seqs here: our client concurrency
+        # (--batch-size, <=28) never approaches vLLM's own defaults (8192/1024) anyway, and
+        # the vendor's scaled-down 4096 would undercut a single max-size page's ~6300-token
+        # prefill (image+prompt), forcing chunked prefill where the higher default does it
+        # in one step. Also NOT passing --enable-prefix-caching: it's already default-on in
+        # this vLLM version, and chandra's own request builder puts the (per-page-unique)
+        # image before the (constant) text prompt, so the shared prompt suffix never gets a
+        # cache hit anyway on a single-pass-per-page batch job like this one.
         uv run --project "$PROJ" vllm serve datalab-to/chandra-ocr-2 \
             --served-model-name chandra --port 8200 \
             --gpu-memory-utilization "${GPU_MEM_UTIL:-0.85}" \
             --limit-mm-per-prompt '{"image": 1}' \
+            --max-model-len 18000 \
+            --mm-processor-kwargs '{"min_pixels": 3136, "max_pixels": 6291456}' \
             > "work/${MODEL}_vllm.log" 2>&1 &
         SERVER_PID=$!
         wait_server 8200
