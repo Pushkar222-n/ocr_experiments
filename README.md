@@ -4,6 +4,21 @@ Compare OCR models on `data/Evaluation set/sample_set/*.pdf` (merged per-categor
 PDFs: Complex_table_layouts 32p, Flowchart 3p, Formulas_with_tables 12p, Handwritten 14p,
 printouts 7p — **68 pages**).
 
+> **The benchmark is over and `chandra` is the model we went with.**
+> **→ [`CHANDRA.md`](CHANDRA.md) is the operator runbook**: cold-start a pod, run it, tune
+> it, free the VRAM and disk. Read that if you just want to *use* chandra rather than
+> re-derive the comparison.
+>
+> Production setup in three commands:
+> ```bash
+> uv sync --project models/chandra   # once per pod (~16 GB)
+> scripts/serve_chandra.sh           # start the vLLM server, keep it resident (~7 min)
+> ./run.sh chandra --out-dir my_run  # attaches instantly; repeat per job
+> scripts/serve_chandra.sh --stop    # release the 39 GB of VRAM
+> ```
+> Rotation correction is **on by default** and pinned to the CPU. Latest full run:
+> `outputs/chandra_oriented_optimized/` — 68 pages, **9.72 s/page**, 118,312 visible chars.
+
 ## Results — all 9 models, 68 pages each
 
 | model | engine | s/page | raw chars | **visible chars** | %text |
@@ -118,8 +133,18 @@ Checked against the real `sample_set`: only `Complex_table_layouts.pdf` has rota
 pages — **7 of 32** (pages 3, 4, 25, 26 at 270°; pages 8, 13, 14 at 90°; confidence
 0.83–0.93). Visually confirmed correct in both rotation directions.
 
-`models/chandra/run.py` is the first (and so far only) caller — see CLAUDE.md for how
-it's wired in and what's left to verify against real OCR output.
+`models/chandra/run.py` is the first (and so far only) caller. **Verified end-to-end on the
+full 68-page set (`outputs/chandra_oriented_optimized/`)**: isolating the 7 rotated pages by
+chandra's own per-page `token_count`, and using the 25 *unrotated* pages of the same pdf as
+a control, orientation buys **+4.8% on the corrected pages vs −0.7% on the control** (best:
+page 14 +13.0%, page 8 +10.5%). Real but modest — chandra was already partly coping with
+sideways pages. See CLAUDE.md for the full table.
+
+**The classifier is pinned to the CPU** (`ORIENT_DEVICE`, default `cpu`), and `run.sh` runs
+it as a pre-pass with `CUDA_VISIBLE_DEVICES=""` *before* vLLM starts. Verified: 0 MiB of GPU
+across a full 68-page orientation pass with the card visible. This matters — the classifier
+is called from an adapter whose decoder already holds ~85% of the card, so a second CUDA
+context there is an OOM waiting to happen.
 
 ## Running a model
 
@@ -139,8 +164,13 @@ UNLIMITED_MULTI=1 uv run --project models/unlimited_ocr python models/unlimited_
 MINERU_VLLM=1 ./run.sh mineru --backend vlm-http-client --out-tag output_vllm  # see below
 ./run.sh surya      # starts `vllm serve datalab-to/surya-ocr-2` (pip vllm, no docker)
 ./run.sh chandra    # starts `vllm serve datalab-to/chandra-ocr-2` (pip vllm, no docker)
-./run.sh chandra --out-tag oriented   # same, + rotation-correction (see above), --include-headers-footers,
-                                      # and tuned vLLM flags; writes outputs/chandra/oriented/, baseline untouched
+
+# Keep the vLLM server resident across runs — loading chandra costs ~7 min (weights +
+# torch.compile + cudagraph capture) and run.sh otherwise pays it every single time.
+# run.sh probes :8200 and attaches to a live server instead of starting its own.
+scripts/serve_chandra.sh                              # start once, stays up (~39 GB VRAM)
+./run.sh chandra --out-dir chandra_oriented_optimized  # attaches, decodes immediately
+scripts/serve_chandra.sh --stop                       # free the VRAM for another model
 
 python scripts/compare.py
 ```

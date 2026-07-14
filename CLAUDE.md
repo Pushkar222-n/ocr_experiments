@@ -3,6 +3,24 @@
 Read this first. It is the handoff doc for this repo: what we are doing, what the pod
 can and cannot run, what is already done, and what is left. `README.md` has the
 user-facing detail; this file has the state and the hard-won gotchas.
+**`CHANDRA.md` is the operator runbook for the winning model** — how to start it, run it,
+tune it, and free the VRAM/disk. Read that one if you just want to *use* chandra.
+
+## STANDING DECISIONS (do not relitigate these)
+
+These are the user's settled calls. They live here, in the repo, because the pod (and
+anything under `/root/`) is ephemeral and will be deleted.
+
+1. **`chandra` is the model we are going with.** The benchmark is over; chandra won on the
+   document classes that matter here. Everything below is about operating it, not choosing it.
+2. **Page-rotation correction (`harness.orient_pdf`) is ALWAYS ON.** It is a permanent
+   default, never an A/B variable. Hold it on in *both* arms of any future experiment.
+   `--no-orient` exists as an escape hatch; do not use it for a benchmark row.
+3. **The orientation classifier must stay on the CPU.** It is called from an adapter whose
+   decoder already holds ~85% of the card; a second CUDA context there is an OOM waiting to
+   happen. Three independent layers enforce this (see the orientation section below).
+4. **Keep the vLLM server resident** (`scripts/serve_chandra.sh`). Loading chandra costs
+   ~7 min; `run.sh` attaches to a live server on :8200 instead of reloading.
 
 ## Goal
 
@@ -743,7 +761,181 @@ correction, with no distortion or wrong-way rotation. The corrected pdf that cha
 actually be pointed at is `work/oriented/Complex_table_layouts.pdf`; full report at
 `work/oriented/Complex_table_layouts.json`.
 
-**Not yet done — this is exactly where the next session should resume:**
+## DONE (2026-07-14) — chandra oriented + tuned, full 68-page run
+
+Run: `scripts/serve_chandra.sh` then `./run.sh chandra --out-dir chandra_oriented_optimized`.
+Output: **`outputs/chandra_oriented_optimized/`** (a *top-level* sibling, not a tag under
+`outputs/chandra/`, so `compare.py` picks it up as its own row and the benchmarked baseline
+is untouched). 68 pages, 11.0 min, **9.72 s/page** (baseline 9.8 — unchanged).
+
+| pdf | pages | base raw | new raw | base visible | new visible | Δ visible |
+|---|---|---|---|---|---|---|
+| `Complex_table_layouts` | 32 | 106,694 | 110,013 | 58,113 | 59,936 | +1,823 |
+| `Flowchart` | 3 | 7,751 | 8,310 | 7,751 | 8,310 | +559 |
+| `Formulas_with_tables` | 12 | 23,128 | 23,576 | 18,935 | 19,440 | +505 |
+| `Handwritten` | 14 | 28,983 | 30,129 | 19,394 | 20,561 | +1,167 |
+| `printouts` | 7 | 13,732 | 14,265 | 10,197 | 10,065 | −132 |
+| **TOTAL** | **68** | 180,288 | **186,293** | 114,390 | **118,312** | **+3,922 (+3.4%)** |
+
+**Attribute the gain carefully — the headline +3.4% is NOT all orientation.** Four of the
+five pdfs have *zero* rotated pages, so their deltas can only come from
+`--include-headers-footers` and decode nondeterminism. Only `Complex_table_layouts`
+exercises rotation. Isolating it with chandra's own per-page `token_count`
+(`*.metadata.json`), against the 25 unrotated pages of the *same* document as a control:
+
+| | pages | base tok | new tok | Δ |
+|---|---|---|---|---|
+| **rotated** (3,4,25,26 @270°; 8,13,14 @90°) | 7 | 15,540 | 16,280 | **+4.8%** |
+| unrotated (same pdf, control) | 25 | 49,882 | 49,548 | −0.7% |
+
+**+4.8% on the corrected pages against −0.7% on the control is a real, attributable
+signal** (best: page 14 +13.0%, page 8 +10.5%). It is modest, not transformative — chandra
+was already partially coping with sideways pages. The `page_box` field proves the fix
+reached the model: `[1588, 2246]` -> `[2246, 1588]`, i.e. the dims swapped, so chandra
+genuinely rendered them upright.
+
+`Flowchart` also improved: **36 -> 46 mermaid edges**, still 3/3 graphs.
+
+**`--max-model-len 18000` is a REQUIREMENT on this A40, not a tuning nicety.** vLLM reports
+`GPU KV cache size: 229,152 tokens`, against the model's declared 262,144-token context.
+229,152 < 262,144, so without the flag vLLM **refuses to start** ("max seq len larger than
+the maximum number of tokens that can be stored in KV cache"). A genuinely flag-free
+control arm therefore *cannot exist* on this card — do not go looking for one. (This also
+means the `CHANDRA_TUNED=0` arm in `run.sh` will not boot as-is; it is kept only to make
+that failure reproducible.)
+
+Correction to the flag analysis above: `--enable-prefix-caching` is **NOT** default-on in
+vLLM 0.19.1 — the engine config logs `enable_prefix_caching=False`. The decision to omit it
+still stands, but *only* on the image-first-block argument (chandra puts the per-page-unique
+image before the constant prompt, so no page ever shares a prefix with another).
+
+### Two operational traps hit while doing this — both cost ~20 min each
+
+**1. Never `uv cache clean` while a `uv` process is live.** `uv run` probes the interpreter
+through a temp file *inside* the cache. Deleting the cache mid-flight kills it with:
+
+    error: Failed to query Python interpreter
+      Caused by: No such file or directory at ".../.cache/uv/.tmpXXXXXX"
+
+vLLM came up, served **0** requests, and the adapter never started — indistinguishable from
+a slow model load. `run.sh` now calls `.venv/bin/python` / `.venv/bin/vllm` **directly**, so
+it never touches the uv cache and cannot be broken this way. It also **skips `uv sync` when
+the venv already exists** (`FORCE_SYNC=1` to override) — with the cache gone, a sync
+re-downloads ~16 GB. Consequence of bypassing `uv run`: the venv's `bin/` is no longer on
+`PATH`, so `run.sh` now exports it — without that, chandra's adapter dies with
+`FileNotFoundError: 'chandra'` when it shells out to the CLI.
+
+**2. paddleocr in chandra's venv makes vLLM log a scary traceback at every boot.** `paddlex`
+registers a vLLM entry-point plugin, `register_paddlex_genai_models`, which fails to import.
+vLLM logs a full `Failed to load plugin` traceback at ERROR — **then continues and serves
+normally.** It is cosmetic. Do not chase it.
+
+### Throughput: `--batch-size 16` is right, and bigger is WORSE (measured)
+
+vLLM prints `Maximum concurrency for 18,000 tokens per request: 45.74x`, which *looks* like
+the default `--batch-size 16` under-drives the card. **It does not.** Same pdf, same
+resident server, only the flag changed:
+
+| `--batch-size` | s/page | chars |
+|---|---|---|
+| **16 (default)** | **12.25** | 110,013 |
+| 48 | 17.04 (**+39% slower**) | 110,533 |
+
+That "45.74x" is computed against `--max-model-len` (18,000), **not against what a page
+actually costs**. A page is ~6,100 vision tokens of prefill, so 32 concurrent pages is
+~196k prefill tokens against a 229k-token KV cache — the scheduler starts preempting and
+thrashes. Do not raise it.
+
+**Corollary that matters for hardware shopping: the A40 is already saturated at batch 16.**
+So a faster card would convert to real throughput rather than being wasted on an under-fed
+GPU — see the VRAM/bandwidth note below.
+
+### What chandra actually costs (for sizing a different GPU)
+
+Measured from the vLLM log and the run's own `*.metadata.json`:
+
+- **Weights: 8.61 GiB.** Everything else in the 39.5 GB you see on the card is KV-cache
+  *reservation* (`--gpu-memory-utilization 0.85`), not demand. `Available KV cache memory:
+  28.02 GiB -> 229,152 tokens`.
+- **A page costs ~6,100 vision tokens + 1,725 generated (median; p95 3,329; max 4,608).**
+  So ~8k tokens in flight per concurrent page, not 18,000.
+- **Therefore chandra fits on a 24 GB card** (4090/3090): 8.61 GiB of weights leaves
+  ~12-13 GiB of KV, ~100k tokens, ~9 pages in flight. Tight but workable at a lower
+  `--batch-size`. A 32 GB 5090 is comfortable. **VRAM is not the blocker.**
+- Decode is **memory-bandwidth bound**, so a faster card scales roughly with bandwidth
+  (A40 = 696 GB/s). L40S 864 (~1.2x), 3090 936 (~1.3x), 4090 1008 (~1.4x), 5090 1792
+  (~2.5x). These are *extrapolations, not measurements.* Ada/Blackwell also add FP8, which
+  Ampere/A40 lacks — potentially another real factor, but quantizing an OCR model is
+  untested here and risks accuracy.
+
+**Read: a 4090/L40S buys ~20-40% and is probably not worth a big premium; the 5090 is the
+only genuine step change.**
+
+### Input resolution: TESTED — raising DPI makes chandra WORSE. Leave it at 192.
+
+**Do not re-run this experiment.** `IMAGE_DPI=256` (which saturates the model's pixel cap —
+74% more vision tokens than the default) was run over the full 68-page set into
+`outputs/chandra_dpi256/`. It is **−1.2% on visible text and 35% slower**:
+
+| pdf | dpi192 visible | dpi256 visible | Δ | 192 s/pg | 256 s/pg |
+|---|---|---|---|---|---|
+| `Complex_table_layouts` | 59,936 | 60,416 | +480 | 12.25 | 19.07 |
+| `Flowchart` | 8,310 | 6,262 | **−2,048** | 16.21 | 13.62 |
+| `Formulas_with_tables` | 19,440 | 19,754 | +314 | 5.48 | 6.07 |
+| `Handwritten` | 20,561 | 20,395 | −166 | 5.15 | 6.07 |
+| `printouts` | 10,065 | 10,111 | +46 | 11.78 | 12.18 |
+| **TOTAL** | **118,312** | **116,938** | **−1,374 (−1.2%)** | **9.72** | **13.15** |
+
+Dense tables gain slightly from the extra resolution (+480), but **`Flowchart` collapses** —
+2,048 fewer chars, and mermaid edges drop 61 → 55. That is the document class chandra is
+*best* at, and the one we most care about. The vision encoder appears to have been trained
+in a specific resolution regime and degrades when pushed to the edge of its pixel budget:
+more pixels is not more signal. **datalab's `IMAGE_DPI = 192` is a tuned default, not a
+lazy one.** The mechanics below are kept only so nobody re-derives them.
+
+#### (mechanics, for reference)
+
+`chandra/settings.py: IMAGE_DPI = 192`, and `chandra/model/util.py: scale_to_fit()` caps
+every image at `(3072, 2048)` = 6,291,456 px. Our pages render to 1587x2246 = **3.58 Mpx,
+only 57% of that cap** — so the default is *not* saturating the model's own input budget.
+
+`IMAGE_DPI` is a pydantic `BaseSettings` field, so it is **env-overridable with zero code
+change**: `IMAGE_DPI=256 ./run.sh chandra --out-dir chandra_dpi256`.
+
+**DPI 256 saturates the cap; anything above it is wasted work.** `scale_to_fit` clamps
+them all to the identical size:
+
+| DPI | rendered | what the model sees | vision tokens |
+|---|---|---|---|
+| **192 (default)** | 1587x2246 | 1596x2240 = 3.58 Mpx | ~3,491 |
+| **256** | 2116x2994 | 2100x2968 = 6.23 Mpx | ~6,086 |
+| 300 | 2480x3509 | **2100x2968 — identical** | ~6,086 |
+| 400 | 3306x4678 | **2100x2968 — identical** | ~6,086 |
+
+So never run above 256: it costs rasterization CPU and delivers byte-identical input.
+(Going *past* 6.29 Mpx would mean patching `scale_to_fit`'s `max_size` — a model-input
+change, not a config one, and the server's `--mm-processor-kwargs max_pixels` would have to
+rise with it.)
+
+### Keep the vLLM server resident (`scripts/serve_chandra.sh`)
+
+Loading chandra costs ~7 min (weights + torch.compile + CUDA-graph capture) and `run.sh`
+used to pay that on *every* invocation. `run.sh` now probes :8200 and **attaches** to a
+live server instead of starting one; its `trap` only kills a server it started itself.
+
+```bash
+scripts/serve_chandra.sh            # start once, stays up, holds ~39 GB
+./run.sh chandra --out-dir <name>   # attaches, decodes immediately
+scripts/serve_chandra.sh --stop     # free the VRAM before running another model
+```
+
+An attached server keeps the flags it was **started** with — `CHANDRA_TUNED` cannot retune a
+running server, and `run.sh` says so loudly rather than silently mislabelling a run.
+
+**Orientation is now a permanent default, per the user, and is never an A/B variable.**
+Hold it ON in both arms of any future experiment.
+
+**Superseded — the original plan, kept for the reasoning only:**
 
 1. `models/chandra/.venv` **is synced and confirmed working** (`uv sync --project
    models/chandra` — needed a retry with `UV_HTTP_TIMEOUT=180` the first time, since the

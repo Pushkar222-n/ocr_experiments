@@ -31,9 +31,14 @@ def main():
     ap.add_argument("--no-orient", action="store_true",
                     help="skip the PP-LCNet rotation-correction pass (harness.orient_pdf)"
                          " and feed the pdf to chandra as-is")
+    ap.add_argument("--out-dir",
+                    help="write to outputs/<out-dir>/ instead of outputs/chandra/. Unlike "
+                         "--out-tag (which nests under the model), this is a top-level "
+                         "sibling, so scripts/compare.py picks it up as its own row and "
+                         "the benchmarked outputs/chandra/ baseline is never touched")
     args = ap.parse_args()
 
-    out_root = output_root(MODEL, args.smoke, args.out_tag)
+    out_root = output_root(args.out_dir or MODEL, args.smoke, args.out_tag)
     out_root.mkdir(parents=True, exist_ok=True)
     docs = []
     for pdf in list_pdfs(args.pdfs):

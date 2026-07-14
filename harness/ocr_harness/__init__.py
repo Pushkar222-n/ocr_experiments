@@ -62,6 +62,14 @@ def classify_rotation(bgr_image) -> tuple[int, float]:
     model, onnxruntime backend so this needs neither paddlepaddle nor a GPU. `bgr_image`
     is a numpy array in BGR order (cv2/PaddleX convention).
 
+    **Pinned to the cpu (`ORIENT_DEVICE`, default `cpu`).** PaddleX resolves `device=None`
+    by *probing* for an accelerator and will happily pick `gpu:0` if one is visible. That
+    is exactly wrong here: this classifier is called from a model adapter (chandra) whose
+    decoder is already served by a vLLM that has reserved ~85% of the card, so a second
+    CUDA context on the same device is at best wasted VRAM and at worst an OOM that kills
+    a run mid-pdf. PP-LCNet is a 7 MB 4-class CNN -- on cpu it costs ~0.2 s/page, which is
+    nothing next to a ~10 s/page OCR decode. Keep it off the GPU.
+
     Returns (angle, score). `angle` is how far the page must be rotated
     **counter-clockwise** to be upright -- verified against PaddleX's own
     `doc_preprocessor` pipeline, which applies the predicted label straight into
@@ -71,9 +79,12 @@ def classify_rotation(bgr_image) -> tuple[int, float]:
     """
     global _ORIENT_CLASSIFIER
     if _ORIENT_CLASSIFIER is None:
+        import os
+
         from paddleocr import DocImgOrientationClassification
         _ORIENT_CLASSIFIER = DocImgOrientationClassification(
             model_name="PP-LCNet_x1_0_doc_ori", engine="onnxruntime",
+            device=os.environ.get("ORIENT_DEVICE", "cpu"),
         )
     results = list(_ORIENT_CLASSIFIER.predict(bgr_image, batch_size=1))
     result = results[0]
