@@ -120,4 +120,102 @@ export function normalizeMathDelims(src) {
   return out.join("\n");
 }
 
-export const prepareMarkdown = (src) => normalizeMathDelims(repairFences(src));
+// ---------------------------------------------------------------- LaTeX documents
+// got_ocr's native format is mathpix LaTeX, not markdown, despite the .md extension:
+// \title{}, \section*{}, and \begin{tabular} (266 of them in one file). KaTeX only does
+// *math* — `tabular` is a document environment it will never render — so without this the
+// whole model reads as raw LaTeX noise. Convert the document structure to markdown/HTML and
+// leave the math to KaTeX.
+
+const looksLikeLatexDoc = (s) =>
+  /\\begin\{tabular\}|\\title\{|\\section\*?\{/.test(s);
+
+// split on a delimiter that isn't backslash-escaped (\& is a literal ampersand)
+const splitUnescaped = (s, ch) =>
+  s.split(new RegExp(`(?<!\\\\)\\${ch}`));
+
+// read a {...} group starting at i (which must be '{'), respecting nesting.
+// returns [content, indexAfterClosingBrace] — a regex can't do this: cell content like
+// \multicolumn{2}{|c|}{ Total {net} } has nested braces and greedy/lazy both get it wrong.
+function readBraced(s, i) {
+  if (s[i] !== "{") return [null, i];
+  let depth = 0;
+  for (let j = i; j < s.length; j++) {
+    if (s[j] === "{" && s[j - 1] !== "\\") depth++;
+    else if (s[j] === "}" && s[j - 1] !== "\\") {
+      depth--;
+      if (depth === 0) return [s.slice(i + 1, j), j + 1];
+    }
+  }
+  return [s.slice(i + 1), s.length]; // unterminated — take the rest
+}
+
+// \multicolumn{n}{spec}{content} -> colspan, \multirow{n}{*}{content} -> rowspan
+function parseCell(raw) {
+  let cell = raw.trim();
+  let attrs = "";
+  for (let guard = 0; guard < 4; guard++) {
+    const m = cell.match(/^\\(multicolumn|multirow)\s*/);
+    if (!m) break;
+    let i = m[0].length;
+    const [n, i1] = readBraced(cell, i);
+    const [, i2] = readBraced(cell, i1);      // the spec — discarded
+    const [content, i3] = readBraced(cell, i2);
+    if (n === null || content === null) break;
+    attrs += m[1] === "multicolumn" ? ` colspan="${n.trim()}"` : ` rowspan="${n.trim()}"`;
+    cell = (content + cell.slice(i3)).trim();
+  }
+  return `<td${attrs}>${cell}</td>`;
+}
+
+function latexRowsToHtml(body) {
+  const rows = body
+    .split(/\\\\/) // rows end with \\
+    .map((r) => r.replace(/\\hline|\\cline\s*\{[^}]*\}|\\toprule|\\midrule|\\bottomrule/g, "").trim())
+    .filter((r) => r.length);
+  const html = rows.map(
+    (row) => `<tr>${splitUnescaped(row, "&").map(parseCell).join("")}</tr>`
+  );
+  return `<table>${html.join("")}</table>`;
+}
+
+export function latexToMarkdown(src) {
+  if (!looksLikeLatexDoc(src)) return src;
+  let t = src;
+
+  // math first, as span/div (works inside the HTML tables we are about to build — remark-math
+  // would never tokenize $...$ in there, same reason as chandra's <math> tags)
+  t = t
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, x) => `\n<div class="math-display">${x.trim()}</div>\n`)
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, x) => `<span class="math-inline">${x.trim()}</span>`);
+
+  // tabular -> html table, innermost first so nested tabulars resolve bottom-up
+  const INNERMOST = /\\begin\{tabular\}\s*(?:\{[^}]*\})?([\s\S]*?)\\end\{tabular\}/;
+  for (let guard = 0; guard < 2000 && INNERMOST.test(t); guard++) {
+    t = t.replace(INNERMOST, (_, body) => latexRowsToHtml(body));
+  }
+  // got_ocr degenerates into token loops on 5/68 pages and gets cut at the 4096-token cap
+  // mid-table, leaving \begin{tabular} with no \end (168 vs 166 in Complex_table_layouts).
+  // Render what it did emit rather than dumping raw latex at the reader.
+  t = t.replace(/\\begin\{tabular\}\s*(?:\{[^}]*\})?([\s\S]*)$/,
+                (_, body) => latexRowsToHtml(body) +
+                  `\n\n> *(table truncated — the model hit its token cap here)*\n`);
+
+  // document structure -> markdown headings
+  t = t
+    .replace(/\\title\s*\{([\s\S]*?)\}/g, (_, x) => `\n# ${x.trim()}\n`)
+    .replace(/\\(?:sub){2}section\*?\s*\{([\s\S]*?)\}/g, (_, x) => `\n#### ${x.trim()}\n`)
+    .replace(/\\subsection\*?\s*\{([\s\S]*?)\}/g, (_, x) => `\n### ${x.trim()}\n`)
+    .replace(/\\section\*?\s*\{([\s\S]*?)\}/g, (_, x) => `\n## ${x.trim()}\n`)
+    .replace(/\\(?:author|date|maketitle)\s*(\{[\s\S]*?\})?/g, "")
+    .replace(/\\footnotetext\s*\{([\s\S]*?)\}/g, (_, x) => `\n> ${x.trim()}\n`)
+    .replace(/\\(?:begin|end)\{(?:document|center|abstract)\}/g, "");
+
+  // unescape the characters latex requires escaping (outside math, which is already fenced
+  // into spans/divs — KaTeX handles its own escapes)
+  t = t.replace(/\\([&%_#$])/g, "$1");
+  return t;
+}
+
+export const prepareMarkdown = (src) =>
+  normalizeMathDelims(latexToMarkdown(repairFences(src)));

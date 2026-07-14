@@ -411,6 +411,61 @@ function MetricsTable({ rows }) {
   );
 }
 
+function PricingTable() {
+  const [p, setP] = useState(null);
+  useEffect(() => {
+    fetch("/outputs/closed/pricing.json").then((r) => r.json()).then(setP).catch(() => {});
+  }, []);
+  if (!p) return null;
+  const rows = Object.entries(p.runs);
+  return (
+    <div className="card">
+      <h3>Pricing — paid APIs (verified {p.verified})</h3>
+      <p className="note">
+        Costs are <strong>measured</strong> wherever the provider reports them. Datalab's API returns
+        its real charge; Landing AI's credits are metered; LlamaParse's free tier absorbed the run so
+        its column is the published list rate.
+      </p>
+      <div className="table-wrap">
+        <table className="metrics">
+          <thead>
+            <tr>
+              <th>run</th>
+              <th>$ / 1k pages</th>
+              <th>$ / 68p</th>
+              <th>cost source</th>
+              <th>tier</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows
+              .sort((a, b) => (a[1].usd_per_1k_pages || 0) - (b[1].usd_per_1k_pages || 0))
+              .map(([run, r]) => (
+                <tr key={run}>
+                  <td>
+                    <span className="cell-model">
+                      <span className="dot" style={{ background: MODEL_BY_ID[run]?.color }} />
+                      {MODEL_BY_ID[run]?.label ?? run}
+                    </span>
+                  </td>
+                  <td>{r.usd_per_1k_pages ? `$${r.usd_per_1k_pages.toFixed(2)}` : "not run"}</td>
+                  <td>{r.usd_per_1k_pages ? `$${r[`cost_68_pages`]?.toFixed(3)}` : "–"}</td>
+                  <td>{r.cost_source}</td>
+                  <td>{r.label}</td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="table-footnote">
+        Tiers not run: {Object.entries(p.unrun_tiers_usd_per_page)
+          .map(([n, rate]) => `${n} = $${(rate * 1000).toFixed(2)}/1k`)
+          .join(" · ")}
+      </p>
+    </div>
+  );
+}
+
 function FieldNotes() {
   return (
     <div className="card notes-card">
@@ -507,6 +562,7 @@ function MetricsView({ rows, category, setCategory }) {
       </div>
 
       <MetricsTable rows={scoped} />
+      <PricingTable />
       <FieldNotes />
     </div>
   );
@@ -518,7 +574,17 @@ export default function App() {
   const [view, setView] = usePersistedState("ocr.view", "compare");
   const [category, setCategoryRaw] = usePersistedState("ocr.category", CATEGORIES[0]);
   const [active, setActive] = usePersistedState("ocr.models", ["lightonocr", "mineru"]);
+  const [theme, setTheme] = usePersistedState("ocr.theme", "system"); // system | light | dark
   const rows = useComparison();
+
+  // "system" removes the attribute so the prefers-color-scheme media query takes over
+  useEffect(() => {
+    const el = document.documentElement;
+    if (theme === "system") el.removeAttribute("data-theme");
+    else el.setAttribute("data-theme", theme);
+  }, [theme]);
+  const cycleTheme = () =>
+    setTheme((t) => (t === "system" ? "light" : t === "light" ? "dark" : "system"));
 
   // metrics view allows an extra "all documents" scope; compare view cannot show it
   const compareCategory = CATEGORIES.includes(category) ? category : CATEGORIES[0];
@@ -533,10 +599,11 @@ export default function App() {
       const i = "12345".indexOf(e.key);
       if (i >= 0 && i < CATEGORIES.length) setCategoryRaw(CATEGORIES[i]);
       if (e.key === "m") setView((v) => (v === "compare" ? "metrics" : "compare"));
+      if (e.key === "t") cycleTheme();
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [setCategoryRaw, setView]);
+  }, [setCategoryRaw, setView, setTheme]);
 
   return (
     <div className="app">
@@ -564,39 +631,61 @@ export default function App() {
             ))}
           </div>
         )}
-        <span className="kbd-hint">1–5 docs · m metrics</span>
+        <button className="mini theme-toggle" onClick={cycleTheme} title={`theme: ${theme}`}>
+          {theme === "dark" ? "🌙" : theme === "light" ? "☀️" : "🖥️"} {theme}
+        </button>
+        <span className="kbd-hint">1–5 docs · m metrics · t theme</span>
       </header>
 
       {view === "compare" && (
         <>
           <div className="model-picker">
-            <span className="picker-label">open</span>
-            {MODELS.filter((m) => !m.closed).map((m) => (
-              <button
-                key={m.id}
-                className={"chip" + (active.includes(m.id) ? " checked" : "")}
-                onClick={() => toggle(m.id)}
-                title={m.note}
-              >
-                <span className="dot" style={{ background: m.color }} />
-                {m.label}
-                {m.variants.length > 1 && <span className="chip-flag">2 engines</span>}
-              </button>
-            ))}
-            <span className="picker-divider" />
-            <span className="picker-label">paid API</span>
-            {MODELS.filter((m) => m.closed).map((m) => (
-              <button
-                key={m.id}
-                className={"chip closed" + (active.includes(m.id) ? " checked" : "")}
-                onClick={() => toggle(m.id)}
-                title={m.note}
-              >
-                <span className="dot" style={{ background: m.color }} />
-                {m.label}
-                <span className="chip-flag">$</span>
-              </button>
-            ))}
+            {[
+              { key: "open", label: "Open source", hint: "self-hosted, GPU", closed: false },
+              { key: "paid", label: "Paid API", hint: "hosted, per-page cost", closed: true },
+            ].map((group) => {
+              const items = MODELS.filter((m) => !!m.closed === group.closed);
+              const on = items.filter((m) => active.includes(m.id)).length;
+              return (
+                <div className="picker-group" key={group.key}>
+                  <div className="picker-head">
+                    <span className="picker-label">{group.label}</span>
+                    <span className="picker-hint">{group.hint}</span>
+                    <button
+                      className="picker-clear"
+                      onClick={() =>
+                        setActive((cur) =>
+                          on
+                            ? cur.filter((id) => !items.some((m) => m.id === id))
+                            : [...cur, ...items.map((m) => m.id)]
+                        )
+                      }
+                    >
+                      {on ? `clear ${on}` : "all"}
+                    </button>
+                  </div>
+                  <div className="chips">
+                    {items.map((m) => (
+                      <button
+                        key={m.id}
+                        className={
+                          "chip" +
+                          (m.closed ? " closed" : "") +
+                          (active.includes(m.id) ? " checked" : "")
+                        }
+                        onClick={() => toggle(m.id)}
+                        title={m.note}
+                      >
+                        <span className="dot" style={{ background: m.color }} />
+                        {m.label}
+                        {m.closed && <span className="chip-flag">$</span>}
+                        {m.variants.length > 1 && <span className="chip-flag">2 engines</span>}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
           <CompareView category={compareCategory} active={active} toggle={toggle} />
         </>
