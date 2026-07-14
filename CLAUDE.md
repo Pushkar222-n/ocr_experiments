@@ -547,67 +547,103 @@ provider: `... run.py datalab`). `--smoke` writes to `outputs/closed/_smoke/`. P
 checkpoint: a finished `<stem>.md` is not re-fetched (these cost money). Each provider
 takes the whole PDF in one job and returns all pages, so concurrency is across the 5 PDFs.
 
-Balanced tier chosen per provider (NOT their premium option):
-- `mistral` → `mistral-ocr-latest`
-- `datalab` → hosted Marker, `use_llm=false` (the non-LLM base tier)
-- `llamaparse` → `parse_mode=parse_page_with_agent` (the "Balanced" preset, gemini-2.5-flash)
-- `landing_ai` → ADE `dpt-2-latest`
+Runs (each = provider + tier, each in its own `outputs/closed/<run>/`):
+- `mistral` → `mistral-ocr-latest` (their only OCR model)
+- `datalab` → **legacy** `/api/v1/marker`, `use_llm=false` (kept; deprecated endpoint)
+- `datalab_balanced` / `datalab_accurate` → current `/api/v1/convert`, `mode=balanced|accurate`
+- `llamaparse` → `tier=agentic` + `version=latest` (their "Balanced" preset)
+- `llamaparse_agentic_plus` → `tier=agentic_plus` + `version=latest` (their premium preset)
+- `landing_ai` → ADE `dpt-2-latest` (their only parse model)
 
-Full 68-page results (weighted s/page = whole-PDF wall clock, not GPU decode):
+Not every provider has a real tier ladder: **Mistral and Landing AI each expose one model**
+(Mistral's other SKU, Document AI, is a different product; Landing AI's plans change the
+credit *price*, not the model). Only Datalab and LlamaParse offer a genuine fast/mid/premium
+choice — and in both cases, **the premium tier turned out not to be worth it** (see below).
 
-| provider | s/page | raw chars | **visible** | $/1k pages | cost / 68p | $ per 10k visible |
+Full 68-page results. Each run is a provider+tier and gets its **own** directory under
+`outputs/closed/<run>/`, so tiers never overwrite each other.
+
+| run | s/page | **visible** | $/68p | $/1k pages | $ per 10k visible | cost source |
 |---|---|---|---|---|---|---|
-| `datalab` | 0.96 | 266,456 | **149,941** | **$3.00** | **$0.204** | **$0.014** |
-| `mistral` | **0.49** | 123,134 | 106,909 | $4.00 | $0.272 | $0.025 |
-| `llamaparse` | 14.31 | 291,707 | 144,455 | $12.50 | $0.850 | $0.059 |
-| `landing_ai` | 2.04 | 259,384 | 90,404 | $30.00 | $2.040 | $0.226 |
+| `datalab` (legacy /marker) | 0.96 | **149,941** | $0.290 | $4.26 | **$0.019** | API-reported |
+| `datalab_balanced` | 1.10 | 147,416 | $0.290 | $4.26 | $0.020 | API-reported |
+| `mistral` | **0.49** | 106,909 | $0.272 | $4.00 | $0.025 | list rate |
+| `datalab_accurate` | 2.43 | 148,848 | $0.680 | $10.00 | $0.046 | API-reported |
+| `llamaparse` (agentic) | 14.31 | 144,455 | $0.850 | $12.50 | $0.059 | list rate (free tier) |
+| `landing_ai` | 2.04 | 90,404 | $2.040 | $30.00 | $0.226 | metered credits |
+| `llamaparse_agentic_plus` | 10.48 | **167,108** | $3.825 | $56.25 | $0.229 | list rate (free tier) |
 
-Actual spend for the run: **$3.37**.
+Total spent across all closed runs: **$8.25**.
 
-**Datalab Marker wins outright and it is not close.** It extracts the most visible text of
-anything in this repo, open or closed (149,941 vs the best open model `mineru` at 128,299),
-is the **cheapest** paid API, and is near-fastest. On cost-per-text it is **16x better than
-`landing_ai`**. It also recovers flowchart edges.
+**Datalab is the best value in the field, open or closed** — more visible text than the best
+open model (`mineru`, 128,299) at $4.26/1k and ~1 s/page.
 
-**`landing_ai` is the trap of the closed set**: metered at exactly 3 credits/page x $0.01 =
-**$30/1k pages — 10x Datalab — for 40% LESS text** than Datalab. Nothing recommends it here.
-**`mistral` is the speed/cost floor** (0.49 s/page, $4/1k) and is genuinely good on
-text/tables/formulas, but it is **not a diagram parser** (flowchart -> 724 chars, zero arrows).
-**`llamaparse` (Agentic) recovers the most flowchart edges (58)** and near-Datalab text, but
-costs 4x Datalab and is **15-30x slower** (14 s/page; 568 s on the 32-page doc).
+### Three findings that only appear once you run the tiers
 
-### Pricing, verified 2026-07-12 (`uv run python run.py prices`)
+**1. Datalab's "accurate" mode buys nothing here.** It costs **2.35x balanced** ($10/1k vs
+$4.26/1k) and is 2.2x slower, for **148,848 visible chars vs balanced's 147,416 (+1%) — and
+*less* than the legacy endpoint's 149,941**. Identical flowchart edges (39). On this document
+set the premium tier is not justified. Do not assume the top tier is better; measure it.
 
-Rates were read off each vendor's public pricing page. **An earlier version of this file
-understated every one of them** (mistral was quoted at $1/1k when it is $4/1k; llamaparse's
-Agentic tier is 10 credits/page, not 3). Costs are recomputed from the usage the APIs already
-reported via `run.py reprice`, which never re-calls the network — re-running to refresh a cost
-column would mean paying for the same pages twice.
+**2. LlamaParse Agentic Plus extracts the most text of anything in this repo and is a WORSE
+diagram parser than the tier below it.** At 45 cr/pg ($56.25/1k, **19x Datalab**) it produces
+167,108 visible chars — the highest, open or closed. But on `Flowchart` it **flattens the
+diagram into 72 table rows and emits ZERO graph syntax** (0 mermaid, 0 `-->`), where the
+cheaper `agentic` tier emits **3 real ```mermaid blocks and 55 edges**. Paying 4.5x more
+bought more text and *destroyed the topology*. If diagrams matter, the cheaper tier is
+strictly better.
+
+**3. The legacy `/api/v1/marker` endpoint bills identically to `mode=balanced`** — 13/2/5/6/3
+cents on the same 5 pdfs, exactly — and extracts marginally *more* text. So migrating to
+`/convert` is an API-lifecycle decision, not a cost or quality one.
+
+### Pricing, verified 2026-07-12
+
+Costs are **measured wherever the provider reports them**, not estimated:
+- **Datalab `/api/v1/convert` returns the real charge** in `cost_breakdown.final_cost_cents`
+  (rounded up to the nearest cent *per request*). So does the legacy `/marker` response — we
+  simply were not reading it, which is why an earlier version of this file carried a bogus
+  "~$3/1k, unconfirmed" guess. **There is no unconfirmed Datalab rate any more.**
+- **Landing AI: 3.00 credits/page is MEASURED**, not documented — the API returns
+  `metadata.credit_usage`, and it is exactly 3.00 cr/pg on all five documents (204 cr / 68 p).
+  Landing AI never publishes a credits-per-page figure. Credit price ($1 = 100 credits on
+  Explore) *is* documented. So the $2.04 is tracked-usage x documented-price.
+- **LlamaParse's free tier (10k credits/month) absorbed both runs**, so its API honestly
+  reports **0 credits**; its cost column is the published list rate, not a metered charge.
+- Mistral bills per page at a published rate; nothing to measure.
 
 | provider | tier | $/1k pages | 68p | |
 |---|---|---|---|---|
 | `mistral` | OCR (`mistral-ocr-latest`) | $4.00 | $0.272 | **<- run** |
-| `mistral` | Document AI | $5.00 | $0.340 | premium |
-| `datalab` | Marker base (`use_llm=false`) | ~$3.00 | $0.204 | **<- run**, *unconfirmed* |
-| `datalab` | High Accuracy (`use_llm=true`) | $6.00 | $0.408 | premium |
-| `llamaparse` | Fast (`parse_page_without_llm`) | $1.25 | $0.085 | 1 cr/pg |
-| `llamaparse` | Cost-effective (`parse_page_with_llm`) | $3.75 | $0.255 | 3 cr/pg |
-| `llamaparse` | Agentic (`parse_page_with_agent`) | $12.50 | $0.850 | **<- run**, 10 cr/pg |
-| `llamaparse` | Agentic Plus (sonnet) | $56.25 | $3.825 | premium, 45 cr/pg |
-| `landing_ai` | ADE `dpt-2-latest` | $30.00 | $2.040 | **<- run**, 3 cr/pg |
+| `mistral` | Document AI | $5.00 | $0.340 | not run |
+| `datalab` | `/convert` mode=fast | *unknown* | — | not run (API reports it) |
+| `datalab` | `/convert` mode=balanced | $4.26 | $0.290 | **<- run** |
+| `datalab` | `/convert` mode=accurate | $10.00 | $0.680 | **<- run** |
+| `llamaparse` | Fast (1 cr/pg) | $1.25 | $0.085 | not run |
+| `llamaparse` | Cost-effective (3 cr/pg) | $3.75 | $0.255 | not run |
+| `llamaparse` | **agentic** (10 cr/pg) | $12.50 | $0.850 | **<- run** |
+| `llamaparse` | **agentic_plus** (45 cr/pg) | $56.25 | $3.825 | **<- run** |
+| `landing_ai` | ADE `dpt-2-latest` (3 cr/pg) | $30.00 | $2.040 | **<- run** |
 
 Credit rates: LlamaParse **$1.25 / 1000 credits**; Landing AI Explore **$1 = 100 credits**
-($0.01/cr; the $250/mo Team plan only gets you to $0.0091/cr = ~$27/1k).
+($0.01/cr; the $250/mo Team plan only reaches $0.0091/cr = ~$27/1k).
 
-**The one soft number is Datalab's base rate.** Their pricing page is client-rendered, there
-is no usage endpoint on the API, and the base `use_llm=false` rate is not published anywhere
-fetchable. $6/1k for High Accuracy **is** confirmed (their blog). The $3/1k base is flagged
-`unconfirmed: True` in `PRICING` — verify it before quoting, because Datalab winning on cost
-depends on it (it still wins on text at any plausible rate).
+`run.py prices` prints this table and dumps it to **`outputs/closed/pricing.json`** for later
+analysis. `run.py reprice` recomputes stored costs offline — never re-call the APIs just to
+refresh a cost column, that means paying for the same pages twice.
 
-**LlamaParse's free tier (10k credits/month) absorbed this run**, so its API honestly reported
-**0 credits**. The cost shown is the list rate, not a metered charge. Landing AI *did* meter:
-204 credits for 68 pages, exactly 3/page.
+### Two API traps, both hit live
+
+- **Datalab `/api/v1/marker` is the OLD endpoint.** The current one is
+  **`POST /api/v1/convert`** with `mode=fast|balanced|accurate`, and it additionally returns
+  `cost_breakdown` and `parse_quality_score` (the latter came back `None` for
+  `output_format=markdown` on every request, so it is not usable as a quality gate here).
+- **LlamaParse: pinning a `model` is dead, and a `tier` needs a `version`.**
+  `model="anthropic-sonnet-4.0"` — still what the Agentic Plus docs show — is **RETIRED** and
+  422s. The API itself says to migrate to tiers. But `tier=agentic_plus` alone fails
+  *asynchronously* with `MISSING_VERSION_FOR_TIER`: the upload is accepted, then the job
+  errors. You must send **`tier` + `version`** (`version=latest`, or pin a date like
+  `2026-01-08` to freeze the config).
 
 `scripts/compare.py` folds the closed rows into `outputs/comparison.json` (tagged
 `closed:true`, one level deeper under `outputs/closed/*/summary.json`), so the frontend
