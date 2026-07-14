@@ -18,6 +18,10 @@ ROOT = Path(__file__).resolve().parents[2]
 SAMPLE_SET = ROOT / "data" / "Evaluation set" / "sample_set"
 OUTPUTS = ROOT / "outputs"
 WORK = ROOT / "work" / "pages"
+ORIENTED_DIR = ROOT / "work" / "oriented"
+ORIENTED_PREVIEW_DIR = ROOT / "work" / "oriented_preview"
+
+_ORIENT_CLASSIFIER = None
 
 
 @dataclass
@@ -51,6 +55,110 @@ def render_pdf(pdf_path: Path, dpi: int = 200) -> list[Path]:
             doc[i].render(scale=dpi / 72).to_pil().save(p)
     doc.close()
     return paths
+
+
+def classify_rotation(bgr_image) -> tuple[int, float]:
+    """4-class (0/90/180/270) document-orientation classifier: PaddleOCR's PP-LCNet
+    model, onnxruntime backend so this needs neither paddlepaddle nor a GPU. `bgr_image`
+    is a numpy array in BGR order (cv2/PaddleX convention).
+
+    **Pinned to the cpu (`ORIENT_DEVICE`, default `cpu`).** PaddleX resolves `device=None`
+    by *probing* for an accelerator and will happily pick `gpu:0` if one is visible. That
+    is exactly wrong here: this classifier is called from a model adapter (chandra) whose
+    decoder is already served by a vLLM that has reserved ~85% of the card, so a second
+    CUDA context on the same device is at best wasted VRAM and at worst an OOM that kills
+    a run mid-pdf. PP-LCNet is a 7 MB 4-class CNN -- on cpu it costs ~0.2 s/page, which is
+    nothing next to a ~10 s/page OCR decode. Keep it off the GPU.
+
+    Returns (angle, score). `angle` is how far the page must be rotated
+    **counter-clockwise** to be upright -- verified against PaddleX's own
+    `doc_preprocessor` pipeline, which applies the predicted label straight into
+    `rotate_image()` (cv2.getRotationMatrix2D, positive = counter-clockwise) with no
+    sign flip. PIL's `Image.rotate(angle)` uses the same counter-clockwise convention,
+    so `img.rotate(angle, expand=True)` reproduces PaddleX's own correction exactly.
+    """
+    global _ORIENT_CLASSIFIER
+    if _ORIENT_CLASSIFIER is None:
+        import os
+
+        from paddleocr import DocImgOrientationClassification
+        _ORIENT_CLASSIFIER = DocImgOrientationClassification(
+            model_name="PP-LCNet_x1_0_doc_ori", engine="onnxruntime",
+            device=os.environ.get("ORIENT_DEVICE", "cpu"),
+        )
+    results = list(_ORIENT_CLASSIFIER.predict(bgr_image, batch_size=1))
+    result = results[0]
+    return int(result["label_names"][0]), float(result["scores"][0])
+
+
+def orient_pdf(pdf_path: Path, dpi: int = 150, preview: bool = True) -> tuple[Path, dict]:
+    """Detect and correct page rotation with `classify_rotation`, writing a copy of the
+    pdf with each rotated page's `/Rotate` fixed up to `work/oriented/<stem>.pdf`. Any
+    renderer that honors `/Rotate` (pypdfium2, and e.g. chandra's own pdf loader) then
+    renders the page upright with no other change needed -- this is PDF-level, model
+    agnostic, and any adapter can call it before handing off a pdf or rendering pages.
+
+    Cached on (size, mtime) so a resumed run does not reclassify. Returns
+    `(path_to_use, report)`: `path_to_use` is `pdf_path` itself, untouched, if no page
+    needed correction. `report["flagged_pages"]` lists 0-indexed pages that were
+    rotated, and if `preview`, `report["preview_dir"]` holds before/after pngs for each
+    one so a human can check the correction before trusting it.
+    """
+    import numpy as np
+    import pypdfium2 as pdfium
+    from pypdf import PdfReader, PdfWriter
+
+    ORIENTED_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = ORIENTED_DIR / f"{pdf_path.stem}.json"
+    corrected_path = ORIENTED_DIR / f"{pdf_path.stem}.pdf"
+    stat = pdf_path.stat()
+    cache_key = {"size": stat.st_size, "mtime": stat.st_mtime}
+    if report_path.exists():
+        cached = json.loads(report_path.read_text())
+        if cached.get("_cache_key") == cache_key:
+            used = corrected_path if cached["any_rotated"] else pdf_path
+            return used, cached
+
+    preview_dir = ORIENTED_PREVIEW_DIR / pdf_path.stem
+    doc = pdfium.PdfDocument(str(pdf_path))
+    pages_report = []
+    for i in range(len(doc)):
+        pil_img = doc[i].render(scale=dpi / 72).to_pil().convert("RGB")
+        bgr = np.array(pil_img)[:, :, ::-1]
+        angle, score = classify_rotation(bgr)
+        pages_report.append({"page": i, "detected_angle": angle, "score": round(score, 4)})
+        if angle != 0 and preview:
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            pil_img.save(preview_dir / f"page_{i:04d}_before.png")
+            pil_img.rotate(angle, expand=True).save(preview_dir / f"page_{i:04d}_after.png")
+    doc.close()
+
+    flagged = [p["page"] for p in pages_report if p["detected_angle"] != 0]
+    report = {
+        "_cache_key": cache_key,
+        "pdf": pdf_path.name,
+        "num_pages": len(pages_report),
+        "pages": pages_report,
+        "flagged_pages": flagged,
+        "any_rotated": bool(flagged),
+        "preview_dir": str(preview_dir) if flagged and preview else None,
+    }
+
+    if flagged:
+        reader = PdfReader(str(pdf_path))
+        writer = PdfWriter()
+        for i, page in enumerate(reader.pages):
+            angle = pages_report[i]["detected_angle"]
+            if angle:
+                # pypdf's Page.rotate() is clockwise; -angle reproduces the
+                # counter-clockwise correction classify_rotation calls for.
+                page.rotate(-angle)
+            writer.add_page(page)
+        with open(corrected_path, "wb") as f:
+            writer.write(f)
+
+    report_path.write_text(json.dumps(report, indent=2))
+    return (corrected_path if flagged else pdf_path), report
 
 
 def pdf_page_count(pdf_path: Path) -> int:
