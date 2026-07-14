@@ -1,0 +1,23 @@
+[project]
+name = "chandra-inference"
+version = "1.0.0"
+description = "Production OCR pipeline: Chandra on a resident vLLM server."
+requires-python = ">=3.11,<3.13"
+
+# torch is capped below 2.11 on purpose: 2.11+ ships +cu130 wheels that need driver >= 580.
+# Leaving vllm unpinned lets uv backtrack to the newest vLLM whose torch pin still fits.
+dependencies = [
+    "chandra-ocr",
+    "vllm",
+    "torch>=2.10,<2.11",
+    "pypdfium2>=4.30",   # page rendering + page counts
+    "pypdf>=4",          # writes the /Rotate-corrected pdf
+    "paddleocr>=3.7",    # PP-LCNet doc-orientation classifier
+    "onnxruntime",       # runs that classifier on CPU — no paddlepaddle, no GPU
+    "numpy",
+    "tqdm>=4.66",
+    "hf-transfer>=0.1.9",
+]
+
+[tool.setuptools.packages.find]
+include = ["ocr*"]
