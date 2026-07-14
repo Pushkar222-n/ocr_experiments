@@ -126,31 +126,68 @@ export const MODELS = [
   },
   {
     id: "datalab",
-    label: "Datalab Marker",
+    label: "Datalab (legacy /marker)",
     color: "#d13b8f",
     closed: true,
     note:
-      "Hosted Marker (use_llm=false, the non-LLM base tier, ~$3/1k pages). THE BEST VALUE IN THE " +
-      "WHOLE FIELD: most visible text of anything here, open or closed (149,941 over 68 pages, vs " +
-      "the best open model MinerU at 128k) AND the cheapest paid API ($0.20/68p) AND near-fastest " +
-      "(0.96 s/page). Recovers flowchart edges. HTML tables inflate its raw count. Upgrade path: " +
-      "High Accuracy (use_llm=true) at $6/1k. Note: base rate is the one unconfirmed number in the " +
-      "price table — Datalab doesn't publish it fetchably.",
+      "The DEPRECATED /api/v1/marker endpoint (superseded by /api/v1/convert — see the two " +
+      "Datalab mode entries). Still the best value in the whole field: 149,941 visible chars, more " +
+      "than any open model (MinerU 128k), at $4.26/1k pages and 0.96 s/page. It bills IDENTICALLY " +
+      "to mode=balanced (13/2/5/6/3 cents on the same 5 pdfs) and extracts marginally more text — " +
+      "so there is no cost reason to migrate, only an API-lifecycle one.",
     variants: [{ id: "api", label: "API", dir: "closed/datalab", benchmark: true }],
   },
   {
+    id: "datalab_balanced",
+    label: "Datalab balanced",
+    color: "#ec4899",
+    closed: true,
+    note:
+      "Current API: /api/v1/convert, mode=balanced. $4.26/1k pages — and that is MEASURED, not " +
+      "estimated: this endpoint returns its own charge in cost_breakdown.final_cost_cents. " +
+      "147,416 visible chars, 1.10 s/page. Recovers flowchart edges (39). Statistically tied with " +
+      "the legacy endpoint on text, at the same price.",
+    variants: [{ id: "api", label: "API", dir: "closed/datalab_balanced", benchmark: true }],
+  },
+  {
+    id: "datalab_accurate",
+    label: "Datalab accurate",
+    color: "#be123c",
+    closed: true,
+    note:
+      "Current API: /api/v1/convert, mode=accurate. 2.35x the price of balanced ($10/1k vs $4.26) " +
+      "and it buys NOTHING measurable on this document set: 148,848 visible chars vs balanced's " +
+      "147,416 (+1%) and the LEGACY endpoint's 149,941 (-0.7%). Same 39 flowchart edges. 2.2x slower. " +
+      "On these 68 pages, paying for 'accurate' is not justified — verify on your own docs before " +
+      "assuming the top tier is worth it.",
+    variants: [{ id: "api", label: "API", dir: "closed/datalab_accurate", benchmark: true }],
+  },
+  {
     id: "llamaparse",
-    label: "LlamaParse",
+    label: "LlamaParse agentic",
     color: "#8b5cf6",
     closed: true,
     note:
-      "LlamaIndex, Balanced preset = parse_page_with_agent (gemini-2.5-flash) = 10 credits/page = " +
-      "$12.50/1k — 4x Datalab for slightly LESS text. Second-highest visible text (144k) and the most " +
-      "flowchart edges recovered (58), but BY FAR the slowest API: 14 s/page (568s on the 32-page doc). " +
-      "The free tier (10k credits/mo) absorbed this run, so the API reported 0 credits and the cost " +
-      "shown is the list rate. Cheaper tiers: Fast 1cr/pg ($1.25/1k), Cost-effective 3cr/pg ($3.75/1k). " +
-      "Premium Agentic Plus is 45cr/pg = $56/1k.",
+      "tier=agentic (the 'Balanced' preset) = 10 credits/page = $12.50/1k — 3x Datalab for LESS text " +
+      "(144k). BY FAR the slowest API: 14 s/page (568s on the 32-page doc). BUT it is the best " +
+      "diagram parser of the paid set: 3 real ```mermaid blocks and 55 edges on Flowchart, the only " +
+      "closed model that fences the graph properly. Free tier (10k cr/mo) absorbed the run, so the " +
+      "API honestly reported 0 credits and the cost shown is list rate.",
     variants: [{ id: "api", label: "API", dir: "closed/llamaparse", benchmark: true }],
+  },
+  {
+    id: "llamaparse_agentic_plus",
+    label: "LlamaParse agentic+",
+    color: "#6d28d9",
+    closed: true,
+    note:
+      "tier=agentic_plus (premium) = 45 credits/page = $56.25/1k — the MOST EXPENSIVE run in this " +
+      "repo ($3.83 for 68 pages, 19x Datalab). It does extract the most visible text of anything, " +
+      "open or closed (167,108). BUT it is a WORSE diagram parser than the cheaper agentic tier: it " +
+      "flattens the flowchart into 72 TABLE ROWS and emits ZERO graph syntax (0 mermaid, 0 arrows) " +
+      "where plain agentic gave 55 edges. More money bought more text and destroyed the topology. " +
+      "Worst cost-per-text of the set ($0.229/10k visible, tied with landing_ai).",
+    variants: [{ id: "api", label: "API", dir: "closed/llamaparse_agentic_plus", benchmark: true }],
   },
   {
     id: "landing_ai",

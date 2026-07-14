@@ -15,11 +15,15 @@ function MermaidBlock({ code }) {
     (async () => {
       try {
         const mermaid = (await import("mermaid")).default;
+        const attr = document.documentElement.getAttribute("data-theme");
+        const dark =
+          attr === "dark" ||
+          (!attr && matchMedia("(prefers-color-scheme: dark)").matches);
         mermaid.initialize({
           startOnLoad: false,
           securityLevel: "loose",
           suppressErrorRendering: true,
-          theme: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "default",
+          theme: dark ? "dark" : "default",
         });
         const { svg } = await mermaid.render(
           "mmd" + Math.random().toString(36).slice(2),
