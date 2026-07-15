@@ -7,14 +7,42 @@
 export const MODELS = [
   {
     id: "chandra",
-    label: "Chandra",
+    label: "Chandra (baseline)",
     color: "#e5484d",
     note:
-      "Best diagram parser in the field: recovers flowchart topology as mermaid, including " +
-      "the QC feedback loops every other model drops (24 nodes / 55 edges / 10 loops on " +
-      "Flowchart vs MinerU's 21/40/0). But it emits the graph in a bare code fence, so it " +
-      "won't auto-render — look at the raw view. Heaviest runtime: carries its own vLLM, ~38 GB VRAM.",
+      "THE MODEL THIS PROJECT SETTLED ON — but compare against 'Chandra oriented+tuned', which " +
+      "is the config actually shipped in inference/ and beats this by +3.1% text for free. " +
+      "Best diagram parser in the field: recovers flowchart topology as mermaid including the QC " +
+      "feedback loops every other model drops (24 nodes / 55 edges / 10 loops vs MinerU's " +
+      "21/40/0). It emits the graph in a bare code fence, so it won't auto-render — look at raw. " +
+      "Weights are only 8.61 GiB; the ~39 GB on the card is KV-cache reservation, not demand.",
     variants: [{ id: "vllm", label: "vLLM", dir: "chandra", benchmark: true }],
+  },
+  {
+    id: "chandra_oriented_optimized",
+    label: "Chandra oriented+tuned",
+    color: "#f43f5e",
+    note:
+      "THE PRODUCTION CONFIG (this is what inference/ runs). Chandra with page-rotation " +
+      "correction on and the tuned vLLM flags. Best chandra run: 112,486 visible chars vs the " +
+      "baseline's 109,101 (+3.1%) at the SAME speed (9.72 vs 9.80 s/page) — the rotation fix is " +
+      "free. Isolating it with per-page token counts: +4.8% on the 7 rotated pages of " +
+      "Complex_table_layouts against −0.7% on that same document's unrotated pages (control), so " +
+      "the gain is real and attributable, not noise. Flowchart also improved: 36 → 46 mermaid edges.",
+    variants: [{ id: "vllm", label: "vLLM", dir: "chandra_oriented_optimized", benchmark: true }],
+  },
+  {
+    id: "chandra_dpi256",
+    label: "Chandra DPI-256",
+    color: "#9f1239",
+    note:
+      "A TESTED DEAD END — kept so nobody re-runs it. Raising the render DPI from chandra's " +
+      "default 192 to 256 (which saturates the model's pixel cap, 74% more vision tokens) is " +
+      "**worse**: 111,343 visible chars vs the oriented run's 112,486, and 35% slower (13.15 vs " +
+      "9.72 s/page). Dense tables gain slightly (+480) but Flowchart — chandra's best document " +
+      "class — COLLAPSES, losing 2,048 chars and 6 mermaid edges. More pixels is not more signal; " +
+      "the vision encoder degrades at the edge of its budget. 192 is a tuned default, not a lazy one.",
+    variants: [{ id: "vllm", label: "vLLM", dir: "chandra_dpi256", benchmark: true }],
   },
   {
     id: "dots_ocr",
