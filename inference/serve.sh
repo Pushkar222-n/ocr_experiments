@@ -72,15 +72,22 @@ nohup .venv/bin/vllm serve "$MODEL" \
   > "$LOG" 2>&1 &
 echo $! > "$PIDFILE"
 
-printf "waiting for the server"
-for _ in $(seq 1 180); do   # up to 15 min
+# Cold start is dominated by weight download (~10 GB the first time) + torch.compile +
+# CUDA-graph capture; on a slow volume or first pull this can run well past 15 min. Wait
+# generously — override with SERVE_WAIT_SECS. We watch the pid and the log so a genuinely
+# dead server fails fast rather than burning the whole budget.
+WAIT_SECS="${SERVE_WAIT_SECS:-2400}"   # 40 min default
+printf "waiting for the server (up to %d min; set SERVE_WAIT_SECS to change)" $((WAIT_SECS / 60))
+deadline=$(( $(date +%s) + WAIT_SECS ))
+while (( $(date +%s) < deadline )); do
   if is_up; then
     echo; echo "vLLM is UP on :${PORT}  (log: $LOG)"
     exit 0
   fi
   if ! kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-    echo; echo "server died on startup — last lines of $LOG:"; tail -25 "$LOG"; exit 1
+    echo; echo "server process exited during startup — last lines of $LOG:"; tail -30 "$LOG"; exit 1
   fi
   printf "."; sleep 5
 done
-echo; echo "timed out. check $LOG"; exit 1
+echo; echo "timed out after ${WAIT_SECS}s. The server may still be loading — check: ./serve.sh --logs"
+exit 1
