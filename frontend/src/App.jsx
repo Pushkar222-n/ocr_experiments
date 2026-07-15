@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { MODELS, MODEL_BY_ID, CATEGORIES } from "./models";
-import PdfViewer from "./PdfViewer";
+import ExperimentPdf from "./ExperimentPdf";
 import Markdown from "./Markdown";
+import MarkdownViewer from "./MarkdownViewer";
 
 /* ---------- data hooks ---------- */
 
@@ -245,7 +246,7 @@ function CompareView({ category, active, toggle }) {
           <strong>{category.replaceAll("_", " ")}.pdf</strong>
           <span className="muted-inline">source document</span>
         </div>
-        <PdfViewer stem={category} />
+        <ExperimentPdf stem={category} />
       </div>
 
       {active.length === 0 && (
@@ -571,6 +572,7 @@ function MetricsView({ rows, category, setCategory }) {
 /* ---------- app shell ---------- */
 
 export default function App() {
+  const [section, setSection] = usePersistedState("ocr.section", "experiments"); // experiments | viewer
   const [view, setView] = usePersistedState("ocr.view", "compare");
   const [category, setCategoryRaw] = usePersistedState("ocr.category", CATEGORIES[0]);
   const [active, setActive] = usePersistedState("ocr.models", ["lightonocr", "mineru"]);
@@ -608,36 +610,52 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <h1>OCR Bench</h1>
-        <nav className="view-switch">
-          <button className={view === "compare" ? "active" : ""} onClick={() => setView("compare")}>
-            Compare
+        <div className="topbar">
+          <h1>OCR Bench</h1>
+          <nav className="section-switch">
+            <button className={section === "experiments" ? "active" : ""} onClick={() => setSection("experiments")}>
+              Experiments
+            </button>
+            <button className={section === "viewer" ? "active" : ""} onClick={() => setSection("viewer")}>
+              Advanced markdown viewer
+            </button>
+          </nav>
+          <button className="mini theme-toggle" onClick={cycleTheme} title={`theme: ${theme}`}>
+            {theme === "dark" ? "🌙" : theme === "light" ? "☀️" : "🖥️"} {theme}
           </button>
-          <button className={view === "metrics" ? "active" : ""} onClick={() => setView("metrics")}>
-            Metrics
-          </button>
-        </nav>
-        {view === "compare" && (
-          <div className="category-tabs">
-            {CATEGORIES.map((c, i) => (
-              <button
-                key={c}
-                className={c === compareCategory ? "active" : ""}
-                onClick={() => setCategory(c)}
-                title={`shortcut: ${i + 1}`}
-              >
-                {c.replaceAll("_", " ")}
+        </div>
+        {section === "experiments" && (
+          <div className="subbar">
+            <nav className="view-switch">
+              <button className={view === "compare" ? "active" : ""} onClick={() => setView("compare")}>
+                Compare
               </button>
-            ))}
+              <button className={view === "metrics" ? "active" : ""} onClick={() => setView("metrics")}>
+                Metrics
+              </button>
+            </nav>
+            {view === "compare" && (
+              <div className="category-tabs">
+                {CATEGORIES.map((c, i) => (
+                  <button
+                    key={c}
+                    className={c === compareCategory ? "active" : ""}
+                    onClick={() => setCategory(c)}
+                    title={`shortcut: ${i + 1}`}
+                  >
+                    {c.replaceAll("_", " ")}
+                  </button>
+                ))}
+              </div>
+            )}
+            <span className="kbd-hint">1–5 docs · m metrics · t theme</span>
           </div>
         )}
-        <button className="mini theme-toggle" onClick={cycleTheme} title={`theme: ${theme}`}>
-          {theme === "dark" ? "🌙" : theme === "light" ? "☀️" : "🖥️"} {theme}
-        </button>
-        <span className="kbd-hint">1–5 docs · m metrics · t theme</span>
       </header>
 
-      {view === "compare" && (
+      {section === "viewer" && <MarkdownViewer />}
+
+      {section === "experiments" && view === "compare" && (
         <>
           <div className="model-picker">
             {[
@@ -691,7 +709,7 @@ export default function App() {
         </>
       )}
 
-      {view === "metrics" && (
+      {section === "experiments" && view === "metrics" && (
         <MetricsView rows={rows} category={category} setCategory={setCategory} />
       )}
     </div>
