@@ -24,6 +24,44 @@ log = logging.getLogger(__name__)
 _TAG = re.compile(r"<[^>]+>")
 _WS = re.compile(r"\s+")
 
+# Page boundary marker, written before every page of the merged .md/.html.
+#
+# Why it exists: chandra returns one result per page, but the merged document used to join
+# them with a bare "\n\n" — so the page boundaries were gone the moment the file was written,
+# and no downstream step could route per page. A page number OCR'd from the page itself
+# ("Page 1") is NOT a substitute: it is document content, appears only when the page happens
+# to print one, and restarts at 1 for every attachment inside a section.
+#
+# It is an html comment, so it is invisible in rendered markdown and legal in the .html too,
+# and it is 1-based to match both `metadata["pages"][]["page_num"]` and how a human counts.
+PAGE_MARKER = "<!-- page: {n} -->"
+_PAGE_MARKER_RE = re.compile(r"^<!-- page: (\d+) -->$", re.MULTILINE)
+
+
+def _join_pages(parts) -> str:
+    """Merge per-page text, each page preceded by its marker.
+
+    Every page gets a marker, including the first, so a consumer can split on the marker
+    alone without special-casing the head of the file.
+    """
+    return "\n\n".join(
+        f"{PAGE_MARKER.format(n=n)}\n\n{text}" for n, text in enumerate(parts, 1)
+    )
+
+
+def split_pages(merged: str) -> list[str]:
+    """Inverse of `_join_pages`: recover per-page text from a merged document.
+
+    Returns [] for text written before markers existed, rather than guessing at boundaries —
+    a wrong split is worse than an honest "unknown", because it would route the wrong page.
+    """
+    hits = list(_PAGE_MARKER_RE.finditer(merged))
+    if not hits:
+        return []
+    bounds = [m.end() for m in hits] + [len(merged)]
+    return [merged[bounds[i]:hits[i + 1].start() if i + 1 < len(hits) else len(merged)].strip()
+            for i in range(len(hits))]
+
 
 def visible_chars(markdown: str) -> int:
     """Characters of real text, markup stripped. Raw length is not comparable across
@@ -39,8 +77,8 @@ def is_done(out_dir: Path, stem: str) -> bool:
 
 def write_document(out_dir: Path, stem: str, results: list, *, save_images: bool = True) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
-    md = "\n\n".join(r.markdown for r in results)
-    html = "\n\n".join(r.html for r in results)
+    md = _join_pages(r.markdown for r in results)
+    html = _join_pages(r.html for r in results)
     (out_dir / f"{stem}.md").write_text(md, encoding="utf-8")
     (out_dir / f"{stem}.html").write_text(html, encoding="utf-8")
 
@@ -58,13 +96,16 @@ def write_document(out_dir: Path, stem: str, results: list, *, save_images: bool
         "total_token_count": sum(r.token_count for r in results),
         "pages": [
             {
-                "page_num": i,
+                # 1-based, matching the `<!-- page: N -->` marker in the .md/.html so the two
+                # can be joined without an off-by-one. Nothing consumed this field when it was
+                # changed from 0-based.
+                "page_num": n,
                 "page_box": r.page_box,
                 "token_count": r.token_count,
                 "num_chunks": len(r.chunks),
                 "num_images": len(r.images or {}),
             }
-            for i, r in enumerate(results)
+            for n, r in enumerate(results, 1)
         ],
     }
     (out_dir / f"{stem}.metadata.json").write_text(json.dumps(metadata, indent=2))
